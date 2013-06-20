@@ -68,7 +68,6 @@ type AuthService struct {
 	db           *sql.DB
 	selId        *sql.Stmt
 	insChallenge *sql.Stmt
-	insToken     *sql.Stmt
 }
 
 func (a *AuthService) getId(name string) (int64, error) {
@@ -81,7 +80,12 @@ func (a *AuthService) getId(name string) (int64, error) {
 }
 
 func (a *AuthService) setChallenge(id int64, c []byte) error {
-	_, err := a.insChallenge.Exec(id, c, time.Now().Add(time.Duration(challengeExpire)*time.Minute))
+	var err error
+	_, err = a.db.Exec("DELETE FROM session WHERE id = $1 AND token IS NULL;", id)
+	if err != nil {
+		return err
+	}
+	_, err = a.insChallenge.Exec(id, c, time.Now().Add(time.Duration(challengeExpire)*time.Minute))
 	if err != nil {
 		return err
 	}
@@ -89,8 +93,25 @@ func (a *AuthService) setChallenge(id int64, c []byte) error {
 }
 
 func (a *AuthService) setToken(id int64, tok []byte) error {
-	_, err := a.insToken.Exec(id, tok, time.Now().Add(time.Duration(tokenExpire)*time.Minute))
+	tx, err := a.db.Begin()
 	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = tx.Exec("DELETE FROM session WHERE id = $1 AND challenge IS NULL;", id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = tx.Exec("INSERT INTO session (id, token, expire) VALUES ($1, $2, $3);",
+		id, tok, time.Now().Add(time.Duration(tokenExpire)*time.Minute))
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	err = tx.Commit()
+	if err != nil {
+		tx.Rollback()
 		return err
 	}
 	return nil
@@ -101,10 +122,10 @@ func (a *AuthService) setToken(id int64, tok []byte) error {
 //
 // Response:
 //     { "challenge": "base64String"}
-func (a *AuthService) Login(w http.ResponseWriter,  r *http.Request) {
+func (a *AuthService) Login(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	var der []byte
-	var arg struct{Name string}
+	var arg struct{ Name string }
 	if err := decoder.Decode(&arg); err != nil {
 		l.Panic(err)
 	}
@@ -133,7 +154,7 @@ func (a *AuthService) Login(w http.ResponseWriter,  r *http.Request) {
 		l.Panic(err)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	res, _ := json.Marshal(&map[string]string{ "challenge": base64.StdEncoding.EncodeToString(tok), })
+	res, _ := json.Marshal(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(tok)})
 	w.Write(res)
 	l.Printf("Auth.Login: sent challenge for %s\n", arg.Name)
 }
@@ -146,7 +167,10 @@ func (a *AuthService) Login(w http.ResponseWriter,  r *http.Request) {
 //   or
 //     401 Unauthorized
 func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
-	var arg struct{Name string; Token string}
+	var arg struct {
+		Name  string
+		Token string
+	}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&arg); err != nil {
 		l.Panic(err)
@@ -175,7 +199,7 @@ func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				l.Panic(err)
 			}
-			res, _ := json.Marshal(&map[string]string{ "token": base64.StdEncoding.EncodeToString(tok), })
+			res, _ := json.Marshal(&map[string]string{"token": base64.StdEncoding.EncodeToString(tok)})
 			w.Write(res)
 			l.Printf("Auth.Authenticate: sent token for %s\n", arg.Name)
 			return
@@ -192,7 +216,10 @@ func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
 //   or
 //     401 Unauthorized
 func (a *AuthService) Valid(w http.ResponseWriter, r *http.Request) {
-	var arg struct{Name string; Token string}
+	var arg struct {
+		Name  string
+		Token string
+	}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&arg); err != nil {
 		l.Println(err)
