@@ -14,13 +14,13 @@ import (
 	"os"
 	"os/signal"
 	"time"
+	"runtime"
 )
 
 const (
 	adminDefaultFile string      = "privkey.der"
 	adminDefaultMode os.FileMode = 0600
 	validatorWorkers int  = 3
-	DEVELOP          bool = true
 	// while testing, set these low so as to not wait around a lot
 	userKeySize  int = 1024
 	groupKeySize int = 1024
@@ -69,6 +69,7 @@ COMMIT; `
 
 var l *log.Logger
 
+var numCPU int
 var port int
 var bind string
 var forceInsecure bool
@@ -78,17 +79,15 @@ var httpsKey string
 
 func init() {
 	l = log.New(os.Stdout, "", log.Lmicroseconds)
+	flag.IntVar(&numCPU, "cpu", runtime.NumCPU(), "Number of CPUs to use")
 	flag.IntVar(&port, "port", 8080, "Port to listen on")
 	flag.StringVar(&bind, "bind", "localhost", "Address to bind on")
-	if DEVELOP {
-		flag.BoolVar(&forceInsecure, "forceInsecure", true, "Force insecure (non-HTTPS) listening")
-	} else {
-		flag.BoolVar(&forceInsecure, "forceInsecure", false, "Force insecure (non-HTTPS) listening")
-	}
+	flag.BoolVar(&forceInsecure, "forceInsecure", false, "Force insecure (non-HTTPS) listening")
 	flag.StringVar(&dsn, "dsn", "host=/var/run/postgresql sslmode=disable", "postgres connection dsn")
 	flag.StringVar(&httpsCert, "https cert", "cert.pem", "TLS cert for HTTP server")
 	flag.StringVar(&httpsKey, "https cert key", "cert.key", "Key for TLS cert for HTTP server")
 	flag.Parse()
+	runtime.GOMAXPROCS(numCPU)
 }
 
 func main() {
