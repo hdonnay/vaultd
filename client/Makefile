@@ -1,0 +1,10 @@
+all: vault
+
+vault: vault.go
+	go get code.google.com/p/go.crypto/ssh/terminal
+	go build -o vault
+
+test: vault
+	./vault -forceUnencrypted -username=defaultAdmin -keyPath="`pwd`" test
+
+.PHONY: test
