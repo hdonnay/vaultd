@@ -207,7 +207,7 @@ func (db *db) NewGroup(name string, primary int64) (int64, error) {
 		return 0, err
 	}
 	userKey, _ := x509.ParsePKIXPublicKey(userKeyder)
-	cryptedSymKey, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, userKey.(*rsa.PublicKey), ugmKey, []byte("defaultAdmin"))
+	cryptedSymKey, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, userKey.(*rsa.PublicKey), ugmKey, []byte(name))
 	if err != nil {
 		l.Println(err)
 		return 0, err

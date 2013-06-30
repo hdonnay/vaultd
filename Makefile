@@ -14,3 +14,8 @@ install:
 	mkdir -p $$GOPATH/src/github.com/hdonnay
 	ln -s `pwd` $$GOPATH/src/github.com/hdonnay/ovaultd
 	go install github.com/hdonnay/ovaultd
+
+test: ovaultd
+	./ovaultd -forceInsecure
+
+.PHONY: test clean setcap

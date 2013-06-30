@@ -30,6 +30,7 @@ const (
 // A group stores their Public key alongside the symmetrically encrypted private key
 // The ugm stores the group key, encrypted for each user
 const initSQL string = `
+SET timezone TO UTC;
 BEGIN;
 CREATE TABLE IF NOT EXISTS users (
 	id       bigserial NOT NULL UNIQUE PRIMARY KEY,
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS gsm (
 	groupId       bigint REFERENCES groups,
 	secretId      bigint REFERENCES secret,
 	cryptedSymKey bytea );
-CREATE TEMP TABLE session (
+DROP TABLE IF EXISTS session;
+CREATE TABLE session (
 	id        bigint,
 	token     bytea,
 	challenge bytea,

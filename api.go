@@ -80,12 +80,13 @@ func (a *AuthService) getId(name string) (int64, error) {
 }
 
 func (a *AuthService) setChallenge(id int64, c []byte) error {
+	expire := time.Now().UTC().Add(time.Duration(challengeExpire)*time.Minute)
 	var err error
 	_, err = a.db.Exec("DELETE FROM session WHERE id = $1 AND token IS NULL;", id)
 	if err != nil {
 		return err
 	}
-	_, err = a.insChallenge.Exec(id, c, time.Now().Add(time.Duration(challengeExpire)*time.Minute))
+	_, err = a.insChallenge.Exec(id, c, expire)
 	if err != nil {
 		return err
 	}
@@ -93,6 +94,7 @@ func (a *AuthService) setChallenge(id int64, c []byte) error {
 }
 
 func (a *AuthService) setToken(id int64, tok []byte) error {
+	expire := time.Now().UTC().Add(time.Duration(challengeExpire)*time.Minute)
 	tx, err := a.db.Begin()
 	if err != nil {
 		tx.Rollback()
@@ -103,8 +105,7 @@ func (a *AuthService) setToken(id int64, tok []byte) error {
 		tx.Rollback()
 		return err
 	}
-	_, err = tx.Exec("INSERT INTO session (id, token, expire) VALUES ($1, $2, $3);",
-		id, tok, time.Now().Add(time.Duration(tokenExpire)*time.Minute))
+	_, err = tx.Exec("INSERT INTO session (id, token, expire) VALUES ($1, $2, $3);", id, tok, expire)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -188,8 +189,7 @@ func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
 		var expire time.Time
 		c := make([]byte, challengeSize)
 		rows.Scan(&c, &expire)
-		a.db.Exec("DELETE FROM session WHERE challenge = $1", c)
-		if time.Since(expire).Minutes() <= float64(challengeExpire) && bytes.Equal(c, decodeBase64(arg.Token)) {
+		if time.Now().Before(expire) && bytes.Equal(c, decodeBase64(arg.Token)) {
 			tok := make([]byte, tokenSize)
 			_, err = io.ReadFull(rand.Reader, tok)
 			if err != nil {
@@ -204,6 +204,7 @@ func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
 			l.Printf("Auth.Authenticate: sent token for %s\n", arg.Name)
 			return
 		}
+		a.db.Exec("DELETE FROM session WHERE challenge = $1", c)
 	}
 	w.WriteHeader(http.StatusUnauthorized)
 }
