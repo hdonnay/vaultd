@@ -1,4 +1,7 @@
-// Clients are expected to attempt a handshake if they receive a 401
+// Clients are expected to attempt a handshake if they receive HTTP 401
+//
+//
+// Any method may return HTTP 500
 package main
 
 // vim: set noexpandtab :
@@ -14,8 +17,10 @@ import (
 	"encoding/json"
 	//"fmt"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -33,6 +38,22 @@ func decodeBase64(in string) []byte {
 		return nil
 	}
 	return out[0:n]
+}
+
+func parseCookie(r *http.Request) (id int64, tok string) {
+	var c *http.Cookie
+	var err error
+	if c, err = r.Cookie("id"); err != nil {
+		l.Println(err)
+		return -1, ""
+	}
+	id, _ = strconv.ParseInt(c.Value, 10, 64)
+	if c, err = r.Cookie("token"); err != nil {
+		l.Println(err)
+		return -1, ""
+	}
+	tok = c.Value
+	return
 }
 
 // Validation bits: Make it so we can call .validate() on all our
@@ -60,9 +81,6 @@ type JsonError struct {
 	Message string
 }
 
-// AuthService abuses the fact that postgres' temp tables are per-session to
-// implement some session state. All tokens/challenges will be lost and have to
-// be re-negotianted if the daemon comes down and up.
 type AuthService struct {
 	ValidateService
 	db           *sql.DB
@@ -79,8 +97,7 @@ func (a *AuthService) getId(name string) (int64, error) {
 	return id, nil
 }
 
-func (a *AuthService) setChallenge(id int64, c []byte) error {
-	expire := time.Now().UTC().Add(time.Duration(challengeExpire)*time.Minute)
+func (a *AuthService) setChallenge(id int64, c []byte, expire time.Time) error {
 	var err error
 	_, err = a.db.Exec("DELETE FROM session WHERE id = $1 AND token IS NULL;", id)
 	if err != nil {
@@ -93,8 +110,7 @@ func (a *AuthService) setChallenge(id int64, c []byte) error {
 	return nil
 }
 
-func (a *AuthService) setToken(id int64, tok []byte) error {
-	expire := time.Now().UTC().Add(time.Duration(challengeExpire)*time.Minute)
+func (a *AuthService) setToken(id int64, tok []byte, expire time.Time) error {
 	tx, err := a.db.Begin()
 	if err != nil {
 		tx.Rollback()
@@ -124,35 +140,49 @@ func (a *AuthService) setToken(id int64, tok []byte) error {
 // Response:
 //     { "challenge": "base64String"}
 func (a *AuthService) Login(w http.ResponseWriter, r *http.Request) {
+	expire := time.Now().UTC().Add(time.Duration(challengeExpire) * time.Minute)
 	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
 	var der []byte
 	var arg struct{ Name string }
 	if err := decoder.Decode(&arg); err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	id, err := a.getId(arg.Name)
 	if err != nil {
 	}
 	err = a.db.QueryRow("SELECT pubKey FROM users WHERE name=$1", arg.Name).Scan(&der)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	c := make([]byte, challengeSize)
 	_, err = io.ReadFull(rand.Reader, c)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	pub, err := x509.ParsePKIXPublicKey(der)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	tok, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, pub.(*rsa.PublicKey), c, []byte(arg.Name))
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
-	err = a.setChallenge(id, c)
+	err = a.setChallenge(id, c, expire)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	res, _ := json.Marshal(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(tok)})
@@ -164,43 +194,57 @@ func (a *AuthService) Login(w http.ResponseWriter, r *http.Request) {
 //     { "name": "user", "token": "base64String" }
 //
 // Response:
-//     { "token": "base64String" }
+//     200 OK with cookies set
 //   or
 //     401 Unauthorized
+//
 func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
+	expire := time.Now().UTC().Add(time.Duration(challengeExpire) * time.Minute)
 	var arg struct {
 		Name  string
 		Token string
 	}
 	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
 	if err := decoder.Decode(&arg); err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	id, err := a.getId(arg.Name)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := a.db.Query("SELECT challenge, expire FROM session WHERE id=$1", id)
 	if err != nil {
-		l.Panic(err)
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	for rows.Next() {
-		var expire time.Time
 		c := make([]byte, challengeSize)
 		rows.Scan(&c, &expire)
 		if time.Now().Before(expire) && bytes.Equal(c, decodeBase64(arg.Token)) {
 			tok := make([]byte, tokenSize)
 			_, err = io.ReadFull(rand.Reader, tok)
 			if err != nil {
-				l.Panic(err)
+				l.Println(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
-			err = a.setToken(id, tok)
+			err = a.setToken(id, tok, expire)
 			if err != nil {
-				l.Panic(err)
+				l.Println(err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
 			}
-			res, _ := json.Marshal(&map[string]string{"token": base64.StdEncoding.EncodeToString(tok)})
-			w.Write(res)
+			http.SetCookie(w, &http.Cookie{Name: "id", Value: fmt.Sprintf("%d", id), MaxAge: 86400})
+			b64tok := base64.StdEncoding.EncodeToString(tok)
+			http.SetCookie(w, &http.Cookie{Name: "token", Value: b64tok, MaxAge: 600})
+			w.WriteHeader(http.StatusOK)
 			l.Printf("Auth.Authenticate: sent token for %s\n", arg.Name)
 			return
 		}
@@ -216,24 +260,57 @@ func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
 //     200 OK
 //   or
 //     401 Unauthorized
+//
 func (a *AuthService) Valid(w http.ResponseWriter, r *http.Request) {
-	var arg struct {
-		Name  string
-		Token string
-	}
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&arg); err != nil {
-		l.Println(err)
+	id, tok := parseCookie(r)
+	if id < 0 {
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	id, err := a.getId(arg.Name)
-	if err != nil {
-		l.Println(err)
-		return
-	}
-	if a.validate(id, decodeBase64(arg.Token)) {
+	if a.validate(id, decodeBase64(tok)) {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusUnauthorized)
+	}
+}
+
+type UserService struct {
+	ValidateService
+	db *sql.DB
+	insUser *sql.Stmt
+	insGroup *sql.Stmt
+	insUGM *sql.Stmt
+}
+
+// Argument:
+//     { "create": "newuser", "admin": bool, "pubkey": "base64string" }
+//
+// Response:
+//     200 OK
+//   or
+//     401 Unauthorized
+//
+func (u *UserService) MakeUser(w http.ResponseWriter, r *http.Request) {
+	//db := u.db
+	var arg struct {
+		Create string
+		Admin bool
+		Pubkey string
+	}
+	id, tok := parseCookie(r)
+	if id < 0 {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if !u.validate(id, decodeBase64(tok)) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	if err := decoder.Decode(&arg); err != nil {
+		l.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 }

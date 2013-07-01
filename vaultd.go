@@ -13,14 +13,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"time"
 	"runtime"
+	"time"
 )
 
 const (
 	adminDefaultFile string      = "privkey.der"
 	adminDefaultMode os.FileMode = 0600
-	validatorWorkers int  = 3
+	validatorWorkers int         = 3
 	// while testing, set these low so as to not wait around a lot
 	userKeySize  int = 1024
 	groupKeySize int = 1024
@@ -170,7 +170,7 @@ func main() {
 					var expire time.Time
 					err := q.QueryRow(req.Id, req.Token).Scan(&expire)
 					if err != nil {
-						l.Printf("Validator: %v\n", i, err)
+						l.Printf("Validator %d: %v\n", i, err)
 						req.Reply <- false
 						break
 					}
@@ -193,18 +193,28 @@ func main() {
 		conn,
 		db.selUserId,
 		db.insChallenge,
-		}
+	}
+
+	us := &UserService{
+		ValidateService{validateChan},
+		conn,
+		db.insUser,
+		db.insGroup,
+		db.insUGM,
+	}
 
 	http.Handle("/", http.FileServer(http.Dir("static/")))
 	http.HandleFunc("/api/login", as.Login)
 	http.HandleFunc("/api/auth", as.Authenticate)
 	http.HandleFunc("/api/valid", as.Valid)
+	http.HandleFunc("/api/makeUser", us.MakeUser)
 
+	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", bind, port), ReadTimeout: time.Duration(60) * time.Second, WriteTimeout: time.Duration(60) * time.Second}
 	l.Printf("Starting Server on %s:%d\n", bind, port)
 	if forceInsecure {
 		l.Println("!!! Starting without HTTPS")
-		l.Fatal(http.ListenAndServe(fmt.Sprintf("%s:%d", bind, port), nil))
+		l.Fatal(srv.ListenAndServe())
 	} else {
-		l.Fatal(http.ListenAndServeTLS(httpsCert, httpsKey, fmt.Sprintf("%s:%d", bind, port), nil))
+		l.Fatal(srv.ListenAndServeTLS(httpsCert, httpsKey))
 	}
 }
