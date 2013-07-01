@@ -5,6 +5,6 @@ vault: vault.go
 	go build -o vault
 
 test: vault
-	./vault -forceUnencrypted -username=defaultAdmin -keyPath="`pwd`" test
+	./vault -forceUnencrypted -username=defaultAdmin -debug -keyPath="`pwd`/" test
 
 .PHONY: test
