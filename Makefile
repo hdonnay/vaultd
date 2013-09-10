@@ -2,6 +2,8 @@ all: ovaultd
 
 ovaultd: *.go
 	go get github.com/lib/pq
+	go get github.com/gokyle/cryptobox/box
+	go get github.com/emicklei/go-restful
 	go build
 
 setcap: vaultd

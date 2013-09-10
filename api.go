@@ -4,313 +4,157 @@
 // Any method may return HTTP 500
 package main
 
-// vim: set noexpandtab :
+// vim: set noexpandtab:
 
 import (
-	"bytes"
+	//"bytes"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha1"
-	"crypto/x509"
-	"database/sql"
+	"github.com/emicklei/go-restful"
+	"github.com/gokyle/cryptobox/box"
+	//"crypto/x509"
+	//	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	//"fmt"
-	"errors"
+	//"errors"
 	"fmt"
 	"io"
 	"net/http"
+	//"time"
 	"strconv"
-	"time"
 )
 
 const (
-	challengeSize   int = 16 // bytes
-	challengeExpire int = 2  //minutes
-	tokenSize       int = 16 // bytes
-	tokenExpire     int = 5  //minutes
+	challengeSize int = 16 // bytes
+	tokenSize     int = 16 // bytes
 )
 
-func decodeBase64(in string) []byte {
-	out := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
-	n, err := base64.StdEncoding.Decode(out, []byte(in))
-	if err != nil {
-		return nil
-	}
-	return out[0:n]
-}
-
-func parseCookie(r *http.Request) (id int64, tok string) {
-	var c *http.Cookie
+func checkAuthentication(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
 	var err error
-	if c, err = r.Cookie("id"); err != nil {
-		l.Println(err)
-		return -1, ""
-	}
-	id, _ = strconv.ParseInt(c.Value, 10, 64)
-	if c, err = r.Cookie("token"); err != nil {
-		l.Println(err)
-		return -1, ""
-	}
-	tok = c.Value
-	return
-}
-
-// Validation bits: Make it so we can call .validate() on all our
-// "service" structs
-type validateRequest struct {
-	Token []byte
-	Id    int64
-	Reply chan bool
-}
-
-type ValidateService struct {
-	validateChan chan *validateRequest
-}
-
-func (v *ValidateService) validate(id int64, token []byte) bool {
-	reply := make(chan bool)
-	defer close(reply)
-	v.validateChan <- &validateRequest{Id: id, Token: token, Reply: reply}
-	return <-reply
-}
-
-// make a struct so we're not free-forming errors all over.
-type JsonError struct {
-	Success bool
-	Message string
-}
-
-type AuthService struct {
-	ValidateService
-	db           *sql.DB
-	selId        *sql.Stmt
-	insChallenge *sql.Stmt
-}
-
-func (a *AuthService) getId(name string) (int64, error) {
+	var token *http.Cookie
 	var id int64
-	err := a.selId.QueryRow(name).Scan(&id)
+	var valid bool
+	token, err = req.Request.Cookie("Token")
 	if err != nil {
-		return 0, errors.New("No such user")
+		resp.WriteErrorString(400, "'Token' not set in cookie")
+		l.Println("'Token' not set in cookie")
+		return
 	}
-	return id, nil
+	idStr, err := req.Request.Cookie("Id")
+	if err != nil {
+		resp.WriteErrorString(400, "'Id' not set in cookie")
+		l.Println("'Id' not set in cookie")
+		return
+	}
+	id, err = strconv.ParseInt(idStr.Value, 10, 64)
+	if err != nil {
+		resp.WriteErrorString(400, "'Id' not valid int64")
+		l.Println("'Id' not valid int64")
+		return
+	}
+	err = q["checkToken"].QueryRow(id, token.Value).Scan(&valid)
+	if err != nil {
+		resp.WriteErrorString(500, "error checking token")
+		l.Printf("Token checking SQL returned error: %v\n", q["checkToken"])
+		return
+	}
+	if !valid {
+		resp.WriteErrorString(401, "Unauthenticated")
+		return
+	}
+	chain.ProcessFilter(req, resp)
 }
 
-func (a *AuthService) setChallenge(id int64, c []byte, expire time.Time) error {
+func checkAuthorization(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+	chain.ProcessFilter(req, resp)
+}
+
+// GET /api/auth?name=me
+//     {"id": int, "challenge": <base64 string>}
+func getChallenge(req *restful.Request, resp *restful.Response) {
 	var err error
-	_, err = a.db.Exec("DELETE FROM session WHERE id = $1 AND token IS NULL;", id)
-	if err != nil {
-		return err
-	}
-	_, err = a.insChallenge.Exec(id, c, expire)
-	if err != nil {
-		return err
-	}
-	return nil
-}
+	var name string = req.PathParameter("name")
+	var c []byte = make([]byte, challengeSize)
 
-func (a *AuthService) setToken(id int64, tok []byte, expire time.Time) error {
-	tx, err := a.db.Begin()
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	_, err = tx.Exec("DELETE FROM session WHERE id = $1 AND challenge IS NULL;", id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	_, err = tx.Exec("INSERT INTO session (id, token, expire) VALUES ($1, $2, $3);", id, tok, expire)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	err = tx.Commit()
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	return nil
-}
-
-// Argument:
-//     { "name": "user" }
-//
-// Response:
-//     { "challenge": "base64String"}
-func (a *AuthService) Login(w http.ResponseWriter, r *http.Request) {
-	expire := time.Now().UTC().Add(time.Duration(challengeExpire) * time.Minute)
-	decoder := json.NewDecoder(r.Body)
-	defer r.Body.Close()
-	var der []byte
-	var arg struct{ Name string }
-	if err := decoder.Decode(&arg); err != nil {
-		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	id, err := a.getId(arg.Name)
-	if err != nil {
-	}
-	err = a.db.QueryRow("SELECT pubKey FROM users WHERE name=$1", arg.Name).Scan(&der)
+	u, err := GetUserByName(name)
 	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusBadRequest, "Cannot find user")
 		return
 	}
-	c := make([]byte, challengeSize)
+
 	_, err = io.ReadFull(rand.Reader, c)
 	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusInternalServerError, "Error generating challenge")
 		return
 	}
-	pub, err := x509.ParsePKIXPublicKey(der)
+
+	box, ok := box.Seal(c, *u.PubKey)
+	if !ok {
+		l.Println("Error boxing challenge")
+		resp.WriteErrorString(http.StatusInternalServerError, "Error boxing challenge")
+		return
+	}
+	err = SaveChallenge(u.Id, c)
 	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusInternalServerError, "Error recording challenge")
 		return
 	}
-	tok, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, pub.(*rsa.PublicKey), c, []byte(arg.Name))
-	if err != nil {
-		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	err = a.setChallenge(id, c, expire)
-	if err != nil {
-		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	res, _ := json.Marshal(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(tok)})
-	w.Write(res)
-	l.Printf("Auth.Login: sent challenge for %s\n", arg.Name)
+
+	resp.WriteEntity(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(box), "id": fmt.Sprintf("%d",u.Id)})
+	l.Printf("Auth.Login: sent challenge for %s\n", name)
+	return
 }
 
-// Argument:
-//     { "name": "user", "token": "base64String" }
-//
-// Response:
-//     200 OK with cookies set
-//   or
-//     401 Unauthorized
-//
-func (a *AuthService) Authenticate(w http.ResponseWriter, r *http.Request) {
-	expire := time.Now().UTC().Add(time.Duration(challengeExpire) * time.Minute)
-	var arg struct {
-		Name  string
-		Token string
-	}
-	decoder := json.NewDecoder(r.Body)
-	defer r.Body.Close()
-	if err := decoder.Decode(&arg); err != nil {
-		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	id, err := a.getId(arg.Name)
+// POST /api/auth {"challenge": <base64 string>}
+//      <Cookies>
+func postChallenge(req *restful.Request, resp *restful.Response) {
+	var err error
+	var tok []byte = make([]byte, tokenSize)
+	var c map[string]string
+
+	err = req.ReadEntity(&c)
 	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusInternalServerError, "Error deserialzing response")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	rows, err := a.db.Query("SELECT challenge, expire FROM session WHERE id=$1", id)
+
+	_, okC := c["challenge"]
+	_, okI := c["id"]
+	if !(okC && okI) {
+		l.Println("Malformed response")
+		resp.WriteErrorString(http.StatusBadRequest, "Malformed response")
+		return
+	}
+
+	id, err := strconv.ParseInt(c["id"], 10, 64)
+	if err != nil {
+		resp.WriteErrorString(http.StatusBadRequest, "Invalid Credentials")
+		return
+	}
+
+	if !CheckChallenge(id, decodeBase64(c["challenge"])) {
+		resp.WriteErrorString(http.StatusBadRequest, "Invalid Credentials")
+		return
+	}
+
+	_, err = io.ReadFull(rand.Reader, tok)
 	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusInternalServerError, "Error generating token")
 		return
 	}
-	for rows.Next() {
-		c := make([]byte, challengeSize)
-		rows.Scan(&c, &expire)
-		if time.Now().Before(expire) && bytes.Equal(c, decodeBase64(arg.Token)) {
-			tok := make([]byte, tokenSize)
-			_, err = io.ReadFull(rand.Reader, tok)
-			if err != nil {
-				l.Println(err)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			err = a.setToken(id, tok, expire)
-			if err != nil {
-				l.Println(err)
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			http.SetCookie(w, &http.Cookie{Name: "id", Value: fmt.Sprintf("%d", id), MaxAge: 86400})
-			b64tok := base64.StdEncoding.EncodeToString(tok)
-			http.SetCookie(w, &http.Cookie{Name: "token", Value: b64tok, MaxAge: 600})
-			w.WriteHeader(http.StatusOK)
-			l.Printf("Auth.Authenticate: sent token for %s\n", arg.Name)
-			return
-		}
-		a.db.Exec("DELETE FROM session WHERE challenge = $1", c)
-	}
-	w.WriteHeader(http.StatusUnauthorized)
-}
 
-// Argument:
-//     { "name": "user", "token": "base64String" }
-//
-// Response:
-//     200 OK
-//   or
-//     401 Unauthorized
-//
-func (a *AuthService) Valid(w http.ResponseWriter, r *http.Request) {
-	id, tok := parseCookie(r)
-	if id < 0 {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if a.validate(id, decodeBase64(tok)) {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(http.StatusUnauthorized)
-	}
-}
-
-type UserService struct {
-	ValidateService
-	db *sql.DB
-	insUser *sql.Stmt
-	insGroup *sql.Stmt
-	insUGM *sql.Stmt
-}
-
-// Argument:
-//     { "create": "newuser", "admin": bool, "pubkey": "base64string" }
-//
-// Response:
-//     200 OK
-//   or
-//     401 Unauthorized
-//
-func (u *UserService) MakeUser(w http.ResponseWriter, r *http.Request) {
-	//db := u.db
-	var arg struct {
-		Create string
-		Admin bool
-		Pubkey string
-	}
-	id, tok := parseCookie(r)
-	if id < 0 {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if !u.validate(id, decodeBase64(tok)) {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	decoder := json.NewDecoder(r.Body)
-	defer r.Body.Close()
-	if err := decoder.Decode(&arg); err != nil {
+	err = SaveToken(id, tok)
+	if err != nil {
 		l.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		resp.WriteErrorString(http.StatusInternalServerError, "Error saving token")
 		return
 	}
+
+	cookie := &http.Cookie{ Name: "Token", Value: base64.StdEncoding.EncodeToString(tok)}
+	http.SetCookie(resp.ResponseWriter, cookie)
+	return
 }
