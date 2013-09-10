@@ -27,9 +27,6 @@ import (
 const (
 	VERSION  string = "0.0.6-dev"
 	jsonMime string = "application/json"
-)
-
-const (
 	_             = iota
 	E_SERVER uint = 1 << iota
 	E_AUTH
@@ -49,6 +46,7 @@ var keyPath string
 var keyFile string
 var api map[string]*url.URL
 var jar *cookiejar.Jar
+var srvKey box.PublicKey
 
 type internalError struct {
 	Code uint
@@ -93,6 +91,20 @@ func getPassphrase(prompt string) []byte {
 	return h.Sum(nil)
 }
 
+func fetchServerKey() (box.PublicKey, error) {
+	var key *bytes.Buffer = new(bytes.Buffer)
+	resp, err := http.Get(api["key"].String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength <= 0 {
+		l.Fatal("key ContentLength <= 0")
+	}
+	io.Copy(key, resp.Body)
+
+	return box.PublicKey(key.Bytes()), nil
+}
 func loadKey() (box.PrivateKey, error) {
 	var err error
 	var raw []byte
@@ -148,9 +160,11 @@ func encryptKey(key box.PrivateKey) error {
 
 func login(privKey box.PrivateKey) error {
 	var err error
+	var challenge []byte
+	var ok bool
 	c := make(map[string]string)
 	// Step1: request challenge
-	resp, err := http.Get(fmt.Sprintf("%s/%s", api["login"].String(), username))
+	resp, err := http.Get(fmt.Sprintf("%s/%s", api["auth"].String(), username))
 	if err != nil {
 		return err
 	}
@@ -160,18 +174,27 @@ func login(privKey box.PrivateKey) error {
 	d := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
 	d.Decode(&c)
+	l.Printf("challenge:\t%v\n", c["challenge"])
+	l.Printf("id:\t%v\n", c["id"])
 	data := decodeBase64(c["challenge"])
-	challenge, ok := box.Open(data, privKey)
+	if box.BoxIsSigned(data) {
+		l.Println("opening signed box...")
+		challenge, ok = box.OpenAndVerify(data, privKey, srvKey)
+	} else {
+		l.Println("opening box...")
+		challenge, ok = box.Open(data, privKey)
+	}
 	if !ok {
+		l.Println("Box returned not ok")
 		return &internalError{E_AUTH}
 	}
 
 	// Step2: validate challenge
-	step2, err := json.Marshal(&map[string]string{"id": c["id"], "token": base64.StdEncoding.EncodeToString(challenge)})
+	step2, err := json.Marshal(&map[string]string{"id": c["id"], "challenge": base64.StdEncoding.EncodeToString(challenge)})
 	if err != nil {
 		return err
 	}
-	resp, err = http.Post(api["login"].String(), jsonMime, strings.NewReader(string(step2)))
+	resp, err = http.Post(api["auth"].String(), jsonMime, strings.NewReader(string(step2)))
 	if err != nil {
 		return err
 	}
@@ -222,25 +245,35 @@ var Usage = func() {
 
 func init() {
 	var logPath string
+	var err error
+	var f *os.File
+	var conf string = os.Getenv("XDG_CONFIG_HOME")
+	if conf == "" {
+		conf = os.ExpandEnv("$HOME/.config")
+	}
 
 	flag.BoolVar(&forceUnencrypted, "forceUnencrypted", false, "Don't try to unencrypt key")
 	flag.BoolVar(&forceInsecure, "forceInsecure", false, "Don't use HTTPS to connect")
 	flag.BoolVar(&DEBUG, "debug", false, "enable debugging output")
 	flag.StringVar(&username, "username", os.Getenv("USER"), "Username")
 	flag.StringVar(&baseUrl, "url", "http://localhost:8080", "Url to contact server at (excludes path)")
-	flag.StringVar(&keyPath, "keyPath", fmt.Sprintf("%s/.config/vault/", os.Getenv("HOME")), "Path to the key")
-	flag.StringVar(&logPath, "logPath", fmt.Sprintf("%s/.config/vault/", os.Getenv("HOME")), "Path to logfile")
+	flag.StringVar(&keyPath, "keyPath", fmt.Sprintf("%s/vault/", conf), "Path to the key")
+	flag.StringVar(&logPath, "logPath", fmt.Sprintf("%s/vault/", conf), "Path to logfile")
 	flag.Parse()
 
 	if sha512.Size384 != secretbox.KeySize {
 		l.Fatalf("Hash size and key size mismatch: %d != %d\n", sha512.Size384, secretbox.KeySize)
 	}
 
-	os.MkdirAll(logPath, 0750)
-	f, err := os.OpenFile(fmt.Sprintf("%slog", logPath), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0660)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Couldn't open logfile: %s\n", fmt.Sprintf("%slog", logPath))
-		os.Exit(1)
+	if !DEBUG {
+		os.MkdirAll(logPath, 0750)
+		f, err = os.OpenFile(fmt.Sprintf("%slog", logPath), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0660)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Couldn't open logfile: %s\n", fmt.Sprintf("%slog", logPath))
+			os.Exit(1)
+		}
+	} else {
+		f = os.Stderr
 	}
 	l = log.New(f, "", log.Lmicroseconds)
 
@@ -253,7 +286,7 @@ func init() {
 	}
 	api = make(map[string]*url.URL)
 	api["/"], _ = url.Parse(baseUrl)
-	api["login"], _ = url.Parse(fmt.Sprintf("%s/api/login", baseUrl))
+	api["key"], _ = url.Parse(fmt.Sprintf("%s/key", baseUrl))
 	api["auth"], _ = url.Parse(fmt.Sprintf("%s/api/auth", baseUrl))
 	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/valid", baseUrl))
 	if forceUnencrypted {
@@ -262,6 +295,14 @@ func init() {
 }
 
 func main() {
+	srvKey, err := fetchServerKey()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Can't fetch server key: %v\n", err)
+		l.Fatal(err)
+	}
+	if DEBUG {
+		l.Printf("server public key: %x\n", srvKey)
+	}
 	switch flag.Arg(0) {
 	case "test":
 		privKey, err := loadKey()
@@ -271,12 +312,12 @@ func main() {
 		if err = login(privKey); err != nil {
 			l.Fatal(err)
 		}
-		if isValid() {
-			fmt.Fprintf(os.Stderr, "Token is valid, successful login.\n")
-		} else {
-			fmt.Fprintf(os.Stderr, "Token isn't valid, unsuccessful login.\n")
-			os.Exit(1)
-		}
+		//if isValid() {
+		//	fmt.Fprintf(os.Stderr, "Token is valid, successful login.\n")
+		//} else {
+		//	fmt.Fprintf(os.Stderr, "Token isn't valid, unsuccessful login.\n")
+		//	os.Exit(1)
+		//}
 	case "reencrypt", "encrypt":
 		privKey, err := loadKey()
 		if err != nil {

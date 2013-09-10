@@ -89,6 +89,7 @@ func getChallenge(req *restful.Request, resp *restful.Response) {
 		return
 	}
 
+	//box, ok := box.SignAndSeal(c, boxPriv, boxPub, *u.PubKey)
 	box, ok := box.Seal(c, *u.PubKey)
 	if !ok {
 		l.Println("Error boxing challenge")
@@ -104,10 +105,13 @@ func getChallenge(req *restful.Request, resp *restful.Response) {
 
 	resp.WriteEntity(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(box), "id": fmt.Sprintf("%d",u.Id)})
 	l.Printf("Auth.Login: sent challenge for %s\n", name)
+	l.Printf("token:\t%v\n", base64.StdEncoding.EncodeToString(c))
+	l.Printf("encrypted challenge:\t%v\n", base64.StdEncoding.EncodeToString(box))
+	l.Printf("id:\t%d\n", u.Id)
 	return
 }
 
-// POST /api/auth {"challenge": <base64 string>}
+// POST /api/auth {"id": <int>, "challenge": <base64 string>}
 //      <Cookies>
 func postChallenge(req *restful.Request, resp *restful.Response) {
 	var err error
@@ -121,6 +125,7 @@ func postChallenge(req *restful.Request, resp *restful.Response) {
 		return
 	}
 
+	l.Printf("got: %+v\n", c)
 	_, okC := c["challenge"]
 	_, okI := c["id"]
 	if !(okC && okI) {

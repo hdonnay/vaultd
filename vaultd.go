@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	adminDefaultFile string      = "privkey.der"
+	adminDefaultFile string      = "defaultAdmin.key"
 	adminDefaultMode os.FileMode = 0600
 	validatorWorkers int         = 3
 	// while testing, set these low so as to not wait around a lot
@@ -94,6 +94,7 @@ func init() {
 		}
 		boxPub = box.PublicKey(t)
 	}
+	l.Printf("Loaded signing key: %x (length %d)\n", boxPub, len(boxPub))
 
 	db, err = sql.Open("postgres", dsn)
 	if err != nil {
@@ -142,7 +143,7 @@ func main() {
 		if err != nil {
 			l.Fatal(err)
 		}
-		err = ioutil.WriteFile("privkey.der", *privKey, 0600)
+		err = ioutil.WriteFile(adminDefaultFile, *privKey, adminDefaultMode)
 		if err != nil {
 			l.Fatal(err)
 		}
