@@ -25,7 +25,7 @@ import (
 
 const (
 	challengeSize int = 16 // bytes
-	tokenSize     int = 16 // bytes
+	tokenSize     int = 32 // bytes
 )
 
 func checkAuthentication(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
