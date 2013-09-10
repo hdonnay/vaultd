@@ -180,7 +180,14 @@ func main() {
 		Param(api.PathParameter("name", "Username to request a challenge for").DataType("string")))
 	api.Route( api.POST("/auth").
 		To(postChallenge).
-		Doc("Validate challenge token"))
+		Doc("Submit decrypted challenge token"))
+
+	api.Route( api.GET("/noop").
+		Filter(checkAuthentication).
+		To(func(req *restful.Request, resp *restful.Response) {
+			return
+		}).
+		Doc("Check Authentication"))
 
 	/*
 	http.HandleFunc("/api/login", as.Login)

@@ -68,8 +68,8 @@ func dbInit(db *sql.DB) error {
 		"getUserIdByName": "SELECT id FROM users WHERE name = $1",
 		"getGroup": "SELECT name, admin, member, userGroup FROM groups WHERE id = $1",
 		"getGroupIdByName": "SELECT id FROM groups WHERE name = $1",
-		"checkToken": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND token = $2 AND expire < current_timestamp);",
-		"checkChallenge": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND challenge = $2 AND expire < current_timestamp);",
+		"checkToken": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND token = $2 AND expire > current_timestamp);",
+		"checkChallenge": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND challenge = $2 AND expire > current_timestamp);",
 	}
 	for name, query := range prepare {
 		x, err := db.Prepare(query)

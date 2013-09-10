@@ -51,7 +51,7 @@ func checkAuthentication(req *restful.Request, resp *restful.Response, chain *re
 		l.Println("'Id' not valid int64")
 		return
 	}
-	err = q["checkToken"].QueryRow(id, token.Value).Scan(&valid)
+	err = q["checkToken"].QueryRow(id, decodeBase64(token.Value)).Scan(&valid)
 	if err != nil {
 		resp.WriteErrorString(500, "error checking token")
 		l.Printf("Token checking SQL returned error: %v\n", q["checkToken"])
@@ -59,8 +59,10 @@ func checkAuthentication(req *restful.Request, resp *restful.Response, chain *re
 	}
 	if !valid {
 		resp.WriteErrorString(401, "Unauthenticated")
+		l.Printf("Auth BAD for %d\n", id)
 		return
 	}
+	l.Printf("Auth OK for %d\n", id)
 	chain.ProcessFilter(req, resp)
 }
 
@@ -105,7 +107,7 @@ func getChallenge(req *restful.Request, resp *restful.Response) {
 
 	resp.WriteEntity(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(box), "id": fmt.Sprintf("%d",u.Id)})
 	l.Printf("Auth.Login: sent challenge for %s\n", name)
-	l.Printf("token:\t%v\n", base64.StdEncoding.EncodeToString(c))
+	l.Printf("token:\t%x\n", c)
 	l.Printf("encrypted challenge:\t%v\n", base64.StdEncoding.EncodeToString(box))
 	l.Printf("id:\t%d\n", u.Id)
 	return

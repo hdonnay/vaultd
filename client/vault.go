@@ -216,7 +216,7 @@ func login(privKey box.PrivateKey) error {
 }
 
 func isValid() bool {
-	req, err := http.NewRequest("POST", api["valid"].String(), nil)
+	req, err := http.NewRequest("GET", api["valid"].String(), nil)
 	if err != nil {
 		l.Println("bad request")
 		return false
@@ -224,9 +224,9 @@ func isValid() bool {
 	for _, cookie := range jar.Cookies(api["auth"]) {
 		req.AddCookie(cookie)
 	}
-//	if DEBUG {
-//		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookies", req.Cookies())
-//	}
+	if DEBUG {
+		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookies", req.Cookies())
+	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false
@@ -288,7 +288,7 @@ func init() {
 	api["/"], _ = url.Parse(baseUrl)
 	api["key"], _ = url.Parse(fmt.Sprintf("%s/key", baseUrl))
 	api["auth"], _ = url.Parse(fmt.Sprintf("%s/api/auth", baseUrl))
-	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/valid", baseUrl))
+	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/noop", baseUrl))
 	if forceUnencrypted {
 		fmt.Fprintf(os.Stderr, "Operating in 'forceUnencrypted' mode!\n")
 	}
@@ -312,12 +312,12 @@ func main() {
 		if err = login(privKey); err != nil {
 			l.Fatal(err)
 		}
-		//if isValid() {
-		//	fmt.Fprintf(os.Stderr, "Token is valid, successful login.\n")
-		//} else {
-		//	fmt.Fprintf(os.Stderr, "Token isn't valid, unsuccessful login.\n")
-		//	os.Exit(1)
-		//}
+		if isValid() {
+			fmt.Fprintf(os.Stderr, "Token is valid, successful login.\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Token isn't valid, unsuccessful login.\n")
+			os.Exit(1)
+		}
 	case "reencrypt", "encrypt":
 		privKey, err := loadKey()
 		if err != nil {
