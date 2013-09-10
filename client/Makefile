@@ -7,6 +7,6 @@ vault: vault.go
 	go build -o vault
 
 test: vault
-	./vault -forceUnencrypted -username=defaultAdmin -debug -keyPath="`pwd`/" test
+	XDG_CONFIG_HOME=`pwd`/test ./vault -debug -forceUnencrypted -username=defaultAdmin test
 
 .PHONY: test
