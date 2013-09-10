@@ -5,16 +5,12 @@ package main
 import (
 	"bytes"
 	"code.google.com/p/go.crypto/ssh/terminal"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/x509"
+	//"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/gokyle/cryptobox/box"
+	"github.com/gokyle/cryptobox/secretbox"
 	"flag"
 	"fmt"
 	"hash"
@@ -85,166 +81,106 @@ func decodeBase64(in string) []byte {
 	return out[0:n]
 }
 
-func checkMAC(message, messageMAC, key []byte) bool {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(message)
-	expectedMAC := mac.Sum(nil)
-	return hmac.Equal(messageMAC, expectedMAC)
-}
-
 func getPassphrase(prompt string) []byte {
+	var h hash.Hash = sha512.New384()
 	fmt.Fprintf(os.Stdout, prompt)
 	phrase, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintf(os.Stdout, "\n")
 	if err != nil {
 		panic(err)
 	}
-	return phrase
+	io.Copy(h, bytes.NewReader(phrase))
+	return h.Sum(nil)
 }
 
-func loadKey() (*rsa.PrivateKey, error) {
+func loadKey() (box.PrivateKey, error) {
 	var err error
-	var der []byte
+	var raw []byte
 	i, err := os.Stat(keyFile)
 	if err != nil {
 		os.MkdirAll(keyPath, 0700)
 		l.Fatalf("Couldn't find Private key, looked for %s\n", keyFile)
 	}
+
+	raw = make([]byte, i.Size())
+
 	f, err := os.Open(keyFile)
 	if err != nil {
 		return nil, err
 	}
-	if forceUnencrypted {
-		der = make([]byte, i.Size())
-		if _, err = io.ReadFull(f, der); err != nil {
-			return nil, err
-		}
-	} else {
-		var h hash.Hash = sha256.New()
-		var ciphertext []byte = make([]byte, i.Size())
-		iv := ciphertext[:aes.BlockSize]
-		cryptedKey := ciphertext[aes.BlockSize:(len(ciphertext) - sha256.Size)]
-		sig := ciphertext[(len(ciphertext) - sha256.Size):]
-		der = make([]byte, len(cryptedKey))
+	if _, err = io.ReadFull(f, raw); err != nil {
+		return nil, err
+	}
 
-		if _, err = io.ReadFull(f, ciphertext); err != nil {
-			return nil, err
-		}
-
+	if !forceUnencrypted {
 		phrase := getPassphrase("Passphrase: ")
-		io.Copy(h, bytes.NewReader(phrase))
-		key := h.Sum(nil)
-
-		block, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, err
-		}
-		stream := cipher.NewCFBDecrypter(block, iv)
-		stream.XORKeyStream(der, cryptedKey)
-
-		if !checkMAC(der, sig, key) {
+		ok := secretbox.KeyIsSuitable(phrase)
+		if !ok {
 			return nil, &internalError{E_BADKEY}
 		}
-	}
-	privKey, err := x509.ParsePKCS1PrivateKey(der)
-	if err != nil {
-		if forceUnencrypted {
-			fmt.Fprintf(os.Stderr, "Couldn't parse key. It's likely this key is encrypted.\n")
+
+		ret, ok := secretbox.Open(raw, secretbox.Key(phrase))
+		if !ok {
 			return nil, &internalError{E_BADKEY}
-		} else {
-			return nil, err
 		}
-	}
-	if forceUnencrypted {
+
+		return box.PrivateKey(ret), nil
+	} else {
 		fmt.Fprintf(os.Stderr, "Encrypt this key with: '%s encrypt'\n", os.Args[0])
+		return box.PrivateKey(raw), nil
 	}
-	return privKey, nil
 }
 
-// Store the given key in this format:
-//
-//     : aes iv :
-//     : Encrypted PKCS1 Private Key :
-//     : hmac-sha256 signature :
-//
-func encryptKey(privKey *rsa.PrivateKey) error {
-	der := x509.MarshalPKCS1PrivateKey(privKey)
-	var h hash.Hash = sha256.New()
-	var ciphertext []byte = make([]byte, aes.BlockSize+len(der)+sha256.Size)
-	iv := ciphertext[:aes.BlockSize]
-	cryptedKey := ciphertext[aes.BlockSize:(len(ciphertext) - sha256.Size)]
-	sig := ciphertext[(len(ciphertext) - sha256.Size):]
+func encryptKey(key box.PrivateKey) error {
+	phrase := getPassphrase("New Passphrase: ")
 
-	fmt.Fprintf(os.Stdout, "New Passphrase: ")
-	phrase, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintf(os.Stdout, "\n")
+	box, ok := secretbox.Seal([]byte(key), phrase)
+	if !ok {
+		return &internalError{E_BADKEY}
+	}
+
+	err := ioutil.WriteFile(keyFile, box, 0600)
 	if err != nil {
 		l.Fatal(err)
-	}
-	io.WriteString(h, string(phrase))
-	key := h.Sum(nil)
-
-	// write the iv
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		l.Println(err)
-		return err
-	}
-	// Calculate the hmac signature
-	mac := hmac.New(sha256.New, key)
-	mac.Write(der)
-	// write the hmac sig
-	if _, err := io.ReadFull(bytes.NewReader(mac.Sum(nil)), sig); err != nil {
-		l.Println(err)
-		return err
-	}
-
-	block, err := aes.NewCipher(key)
-	mode := cipher.NewCFBEncrypter(block, iv)
-	mode.XORKeyStream(cryptedKey, der)
-
-	err = ioutil.WriteFile(keyFile, ciphertext, 0600)
-	if err != nil {
-		panic(err)
 	}
 	return nil
 }
 
-func login(privKey *rsa.PrivateKey) error {
+func login(privKey box.PrivateKey) error {
 	var err error
 	c := make(map[string]string)
 	// Step1: request challenge
-	step1, err := json.Marshal(&map[string]string{"name": username})
+	resp, err := http.Get(fmt.Sprintf("%s/%s", api["login"].String(), username))
 	if err != nil {
 		return err
 	}
-	resp, err := http.Post(api["login"].String(), jsonMime, strings.NewReader(string(step1)))
-	if err != nil {
-		return err
+	if DEBUG {
+		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "login response", resp)
 	}
-//	if DEBUG {
-//		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "login response", resp)
-//	}
 	d := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
 	d.Decode(&c)
 	data := decodeBase64(c["challenge"])
-	challenge, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, privKey, data, []byte(username))
+	challenge, ok := box.Open(data, privKey)
+	if !ok {
+		return &internalError{E_AUTH}
+	}
 
 	// Step2: validate challenge
-	step2, err := json.Marshal(&map[string]string{"name": username, "token": base64.StdEncoding.EncodeToString(challenge)})
+	step2, err := json.Marshal(&map[string]string{"id": c["id"], "token": base64.StdEncoding.EncodeToString(challenge)})
 	if err != nil {
 		return err
 	}
-	resp, err = http.Post(api["auth"].String(), jsonMime, strings.NewReader(string(step2)))
+	resp, err = http.Post(api["login"].String(), jsonMime, strings.NewReader(string(step2)))
 	if err != nil {
 		return err
 	}
-//	if DEBUG {
-//		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "auth response", resp)
-//		for _, c := range resp.Cookies() {
-//			fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookie:", c)
-//		}
-//	}
+	if DEBUG {
+		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "auth response", resp)
+		for _, c := range resp.Cookies() {
+			fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookie:", c)
+		}
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &internalError{E_AUTH}
 	}
@@ -252,7 +188,7 @@ func login(privKey *rsa.PrivateKey) error {
 		return &internalError{E_SERVER}
 	}
 
-	jar.SetCookies(api["auth"], resp.Cookies())
+	jar.SetCookies(api["/"], resp.Cookies())
 	return nil
 }
 
@@ -286,6 +222,7 @@ var Usage = func() {
 
 func init() {
 	var logPath string
+
 	flag.BoolVar(&forceUnencrypted, "forceUnencrypted", false, "Don't try to unencrypt key")
 	flag.BoolVar(&forceInsecure, "forceInsecure", false, "Don't use HTTPS to connect")
 	flag.BoolVar(&DEBUG, "debug", false, "enable debugging output")
@@ -294,7 +231,11 @@ func init() {
 	flag.StringVar(&keyPath, "keyPath", fmt.Sprintf("%s/.config/vault/", os.Getenv("HOME")), "Path to the key")
 	flag.StringVar(&logPath, "logPath", fmt.Sprintf("%s/.config/vault/", os.Getenv("HOME")), "Path to logfile")
 	flag.Parse()
-	keyFile = fmt.Sprintf("%skey", keyPath)
+
+	if sha512.Size384 != secretbox.KeySize {
+		l.Fatalf("Hash size and key size mismatch: %d != %d\n", sha512.Size384, secretbox.KeySize)
+	}
+
 	os.MkdirAll(logPath, 0750)
 	f, err := os.OpenFile(fmt.Sprintf("%slog", logPath), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0660)
 	if err != nil {
@@ -302,7 +243,8 @@ func init() {
 		os.Exit(1)
 	}
 	l = log.New(f, "", log.Lmicroseconds)
-	l.Printf("vault client v%s started.\n", VERSION)
+
+	keyFile = fmt.Sprintf("%skey", keyPath)
 	// This is bad, need real options here
 	jar, err = cookiejar.New(nil)
 	if err != nil {
@@ -310,6 +252,7 @@ func init() {
 		os.Exit(1)
 	}
 	api = make(map[string]*url.URL)
+	api["/"], _ = url.Parse(baseUrl)
 	api["login"], _ = url.Parse(fmt.Sprintf("%s/api/login", baseUrl))
 	api["auth"], _ = url.Parse(fmt.Sprintf("%s/api/auth", baseUrl))
 	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/valid", baseUrl))
