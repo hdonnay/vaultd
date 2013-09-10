@@ -159,7 +159,13 @@ func postChallenge(req *restful.Request, resp *restful.Response) {
 		return
 	}
 
-	cookie := &http.Cookie{ Name: "Token", Value: base64.StdEncoding.EncodeToString(tok)}
-	http.SetCookie(resp.ResponseWriter, cookie)
+	for k, v :=  range map[string]string{
+		"Token": base64.StdEncoding.EncodeToString(tok),
+		"Id": fmt.Sprintf("%d", id),
+	} {
+		cookie := &http.Cookie{ Name: k, Value: v}
+		http.SetCookie(resp.ResponseWriter, cookie)
+	}
+
 	return
 }
