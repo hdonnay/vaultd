@@ -9,10 +9,10 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/gokyle/cryptobox/box"
-	"github.com/gokyle/cryptobox/secretbox"
 	"flag"
 	"fmt"
+	"github.com/gokyle/cryptobox/box"
+	"github.com/gokyle/cryptobox/secretbox"
 	"hash"
 	"io"
 	"io/ioutil"
@@ -21,36 +21,40 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	VERSION  string = "0.0.6-dev"
 	jsonMime string = "application/json"
-	_             = iota
-	E_SERVER uint = 1 << iota
+	_               = iota
+	E_SERVER uint   = 1 << iota
 	E_AUTH
 	E_PASSPHRASE
 	E_NOKEY
 	E_BADKEY
 )
 
-var l *log.Logger
+var stdout *log.Logger
 
-var forceUnencrypted bool
 var forceInsecure bool
 var DEBUG bool
 var username string
 var baseUrl string
-var keyPath string
-var keyFile string
+var confPath string
 var api map[string]*url.URL
-var jar *cookiejar.Jar
+
+var keyFile string
+var myId int64
+var client *http.Client
 var srvKey box.PublicKey
 
 type internalError struct {
 	Code uint
 }
+
 func (i *internalError) Error() string {
 	var ret string
 	switch i.Code {
@@ -70,6 +74,15 @@ func (i *internalError) Error() string {
 	return ret
 }
 
+type User struct {
+	Id   int64
+	Name string
+	//PubKey   box.PublicKey
+	PubKey   []byte
+	Creation time.Time
+	Admin    bool
+}
+
 func decodeBase64(in string) []byte {
 	out := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
 	n, err := base64.StdEncoding.Decode(out, []byte(in))
@@ -85,7 +98,7 @@ func getPassphrase(prompt string) []byte {
 	phrase, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintf(os.Stdout, "\n")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	io.Copy(h, bytes.NewReader(phrase))
 	return h.Sum(nil)
@@ -99,19 +112,21 @@ func fetchServerKey() (box.PublicKey, error) {
 	}
 	defer resp.Body.Close()
 	if resp.ContentLength <= 0 {
-		l.Fatal("key ContentLength <= 0")
+		log.Fatal("key ContentLength <= 0")
 	}
+	// TODO: error check
 	io.Copy(key, resp.Body)
 
 	return box.PublicKey(key.Bytes()), nil
 }
+
 func loadKey() (box.PrivateKey, error) {
 	var err error
 	var raw []byte
 	i, err := os.Stat(keyFile)
 	if err != nil {
-		os.MkdirAll(keyPath, 0700)
-		l.Fatalf("Couldn't find Private key, looked for %s\n", keyFile)
+		os.MkdirAll(confPath, 0700)
+		log.Fatalf("Couldn't find Private key, looked for %s\n", keyFile)
 	}
 
 	raw = make([]byte, i.Size())
@@ -124,23 +139,25 @@ func loadKey() (box.PrivateKey, error) {
 		return nil, err
 	}
 
-	if !forceUnencrypted {
-		phrase := getPassphrase("Passphrase: ")
-		ok := secretbox.KeyIsSuitable(phrase)
-		if !ok {
-			return nil, &internalError{E_BADKEY}
-		}
+	//if !box.KeyIsSuitable(raw) {
+	//	phrase := getPassphrase("Passphrase: ")
+	//	if !secretbox.KeyIsSuitable(phrase) {
+	//		return nil, &internalError{E_BADKEY}
+	//	}
 
-		ret, ok := secretbox.Open(raw, secretbox.Key(phrase))
-		if !ok {
-			return nil, &internalError{E_BADKEY}
-		}
+	//	ret, ok := secretbox.Open(raw, secretbox.Key(phrase))
+	//	if !ok {
+	//		return nil, &internalError{E_BADKEY}
+	//	}
 
-		return box.PrivateKey(ret), nil
-	} else {
-		fmt.Fprintf(os.Stderr, "Encrypt this key with: '%s encrypt'\n", os.Args[0])
-		return box.PrivateKey(raw), nil
-	}
+	//	if !box.KeyIsSuitable(ret) {
+	//		return nil, &internalError{E_BADKEY}
+	//	}
+	//	return box.PrivateKey(ret), nil
+	//} else {
+	stdout.Printf("This key is unencrypted!\nEncrypt this key with: '%s encrypt'\n", os.Args[0])
+	return box.PrivateKey(raw), nil
+	//}
 }
 
 func encryptKey(key box.PrivateKey) error {
@@ -153,7 +170,7 @@ func encryptKey(key box.PrivateKey) error {
 
 	err := ioutil.WriteFile(keyFile, box, 0600)
 	if err != nil {
-		l.Fatal(err)
+		log.Fatal(err)
 	}
 	return nil
 }
@@ -162,30 +179,26 @@ func login(privKey box.PrivateKey) error {
 	var err error
 	var challenge []byte
 	var ok bool
+	var jar *cookiejar.Jar
 	c := make(map[string]string)
 	// Step1: request challenge
 	resp, err := http.Get(fmt.Sprintf("%s/%s", api["auth"].String(), username))
 	if err != nil {
 		return err
 	}
-	if DEBUG {
-		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "login response", resp)
-	}
 	d := json.NewDecoder(resp.Body)
 	defer resp.Body.Close()
 	d.Decode(&c)
-	l.Printf("challenge:\t%v\n", c["challenge"])
-	l.Printf("id:\t%v\n", c["id"])
 	data := decodeBase64(c["challenge"])
 	if box.BoxIsSigned(data) {
-		l.Println("opening signed box...")
+		log.Println("opening signed box...")
 		challenge, ok = box.OpenAndVerify(data, privKey, srvKey)
 	} else {
-		l.Println("opening box...")
+		log.Println("opening box...")
 		challenge, ok = box.Open(data, privKey)
 	}
 	if !ok {
-		l.Println("Box returned not ok")
+		log.Println("unboxing returned not ok")
 		return &internalError{E_AUTH}
 	}
 
@@ -198,12 +211,6 @@ func login(privKey box.PrivateKey) error {
 	if err != nil {
 		return err
 	}
-	if DEBUG {
-		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "auth response", resp)
-		for _, c := range resp.Cookies() {
-			fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookie:", c)
-		}
-	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &internalError{E_AUTH}
 	}
@@ -211,27 +218,39 @@ func login(privKey box.PrivateKey) error {
 		return &internalError{E_SERVER}
 	}
 
+	jar, err = cookiejar.New(nil)
+	if err != nil {
+		log.Fatalf("Failed opening cookiejar: %v\n", err)
+	}
 	jar.SetCookies(api["/"], resp.Cookies())
+	myId, _ = strconv.ParseInt(c["id"], 10, 64)
+	client = &http.Client{Jar: jar}
+
 	return nil
 }
 
 func isValid() bool {
-	req, err := http.NewRequest("GET", api["valid"].String(), nil)
-	if err != nil {
-		l.Println("bad request")
-		return false
-	}
-	for _, cookie := range jar.Cookies(api["auth"]) {
-		req.AddCookie(cookie)
-	}
-	if DEBUG {
-		fmt.Fprintf(os.Stderr, "DEBUG: %s\n%v\n\n", "cookies", req.Cookies())
-	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := client.Get(api["valid"].String())
 	if err != nil {
 		return false
 	}
 	return res.StatusCode == http.StatusOK
+}
+
+func fetchUser(id int64) (*User, error) {
+	var u User = User{}
+	res, err := client.Get(fmt.Sprintf("%s/%d", api["user"].String(), id))
+	if err != nil {
+		return nil, err
+	}
+	d := json.NewDecoder(res.Body)
+	defer res.Body.Close()
+	d.Decode(&u)
+	return &u, nil
+}
+
+func createUser(name string, groups []string, admin bool) error {
+	return nil
 }
 
 var Usage = func() {
@@ -244,95 +263,92 @@ var Usage = func() {
 }
 
 func init() {
-	var logPath string
-	var err error
-	var f *os.File
+	//var err error
 	var conf string = os.Getenv("XDG_CONFIG_HOME")
 	if conf == "" {
 		conf = os.ExpandEnv("$HOME/.config")
 	}
 
-	flag.BoolVar(&forceUnencrypted, "forceUnencrypted", false, "Don't try to unencrypt key")
+	log.SetFlags(0)
+	log.SetOutput(os.Stderr)
+	stdout = log.New(os.Stdout, "", 0)
+
 	flag.BoolVar(&forceInsecure, "forceInsecure", false, "Don't use HTTPS to connect")
 	flag.BoolVar(&DEBUG, "debug", false, "enable debugging output")
 	flag.StringVar(&username, "username", os.Getenv("USER"), "Username")
 	flag.StringVar(&baseUrl, "url", "http://localhost:8080", "Url to contact server at (excludes path)")
-	flag.StringVar(&keyPath, "keyPath", fmt.Sprintf("%s/vault/", conf), "Path to the key")
-	flag.StringVar(&logPath, "logPath", fmt.Sprintf("%s/vault/", conf), "Path to logfile")
+	flag.StringVar(&confPath, "conf", fmt.Sprintf("%s/vault/", conf), "Path to configs and key")
 	flag.Parse()
 
 	if sha512.Size384 != secretbox.KeySize {
-		l.Fatalf("Hash size and key size mismatch: %d != %d\n", sha512.Size384, secretbox.KeySize)
+		log.Fatalf("Hash size and key size mismatch: %d != %d\n", sha512.Size384, secretbox.KeySize)
 	}
 
-	if !DEBUG {
-		os.MkdirAll(logPath, 0750)
-		f, err = os.OpenFile(fmt.Sprintf("%slog", logPath), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0660)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Couldn't open logfile: %s\n", fmt.Sprintf("%slog", logPath))
-			os.Exit(1)
-		}
-	} else {
-		f = os.Stderr
-	}
-	l = log.New(f, "", log.Lmicroseconds)
-
-	keyFile = fmt.Sprintf("%skey", keyPath)
 	// This is bad, need real options here
-	jar, err = cookiejar.New(nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed opening cookiejar: %v\n", err)
-		os.Exit(1)
-	}
+	keyFile = fmt.Sprintf("%skey", confPath)
+
 	api = make(map[string]*url.URL)
 	api["/"], _ = url.Parse(baseUrl)
 	api["key"], _ = url.Parse(fmt.Sprintf("%s/key", baseUrl))
 	api["auth"], _ = url.Parse(fmt.Sprintf("%s/api/auth", baseUrl))
 	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/noop", baseUrl))
-	if forceUnencrypted {
-		fmt.Fprintf(os.Stderr, "Operating in 'forceUnencrypted' mode!\n")
-	}
+	api["user"], _ = url.Parse(fmt.Sprintf("%s/api/user", baseUrl))
 }
 
 func main() {
+	if flag.Arg(0) == "help" {
+		Usage()
+		os.Exit(1)
+	}
+	privKey, err := loadKey()
+	if err != nil {
+		log.Fatal(err)
+	}
 	srvKey, err := fetchServerKey()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Can't fetch server key: %v\n", err)
-		l.Fatal(err)
+		log.Fatalf("Can't fetch server key: %v\n", err)
 	}
 	if DEBUG {
-		l.Printf("server public key: %x\n", srvKey)
+		log.Printf("server public key: %x\n", srvKey)
 	}
 	switch flag.Arg(0) {
 	case "test":
-		privKey, err := loadKey()
-		if err != nil {
-			l.Fatal(err)
-		}
+		var me *User
 		if err = login(privKey); err != nil {
-			l.Fatal(err)
+			log.Fatal(err)
 		}
 		if isValid() {
-			fmt.Fprintf(os.Stderr, "Token is valid, successful login.\n")
+			stdout.Printf("Token is valid, successful login.\n")
 		} else {
-			fmt.Fprintf(os.Stderr, "Token isn't valid, unsuccessful login.\n")
-			os.Exit(1)
+			stdout.Fatalf("Token isn't valid, unsuccessful login.\n")
+		}
+		me, err = fetchUser(myId)
+		if err != nil {
+			log.Fatalf("Could not fetch self: %v\n", err)
+		} else {
+			log.Printf("Fetched self!: %+v\n", me)
+		}
+	case "user":
+		switch flag.Arg(1) {
+		case "new":
+			newU := flag.NewFlagSet("user new", flag.ExitOnError)
+			admin := *newU.Bool("admin", false, "Should user be an admin")
+			groups := strings.Split(*newU.String("groups", "", "Additional groups to add a user to"), ",")
+			newU.Parse(flag.Args()[2:])
+			if newU.NArg() != 1 {
+				log.Fatalf("Wrong number of arguments!\n")
+			}
+			createUser(newU.Arg(0), groups, admin)
+		default:
+			log.Println("HELP")
 		}
 	case "reencrypt", "encrypt":
-		privKey, err := loadKey()
-		if err != nil {
-			l.Fatal(err)
-		}
 		err = encryptKey(privKey)
 		if err != nil {
-			fmt.Fprint(os.Stderr, err)
-			os.Exit(1)
+			log.Fatal(err)
 		}
-	case "help":
-		fallthrough
 	default:
 		Usage()
-		os.Exit(1)
 	}
 	os.Exit(0)
 }
