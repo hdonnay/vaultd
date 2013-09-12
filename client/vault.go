@@ -83,6 +83,14 @@ type User struct {
 	Admin    bool
 }
 
+type Group struct {
+	Id        int64
+	Name      string
+	Admin     []int64
+	Member    []int64
+	UserGroup bool
+}
+
 func decodeBase64(in string) []byte {
 	out := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
 	n, err := base64.StdEncoding.Decode(out, []byte(in))
@@ -249,7 +257,45 @@ func fetchUser(id int64) (*User, error) {
 	return &u, nil
 }
 
-func createUser(name string, groups []string, admin bool) error {
+func searchUser(name string) ([]int64, error) {
+	var u struct{ Id []int64 }
+	v := url.Values{}
+	v.Set("name", name)
+	res, err := client.Get(fmt.Sprintf("%s?%s", api["user"].String(), v.Encode()))
+	log.Print(res)
+	if err != nil {
+		return nil, err
+	}
+	d := json.NewDecoder(res.Body)
+	defer res.Body.Close()
+	d.Decode(&u)
+	return u.Id, nil
+}
+
+func fetchGroup(id int64) (*Group, error) {
+	var g Group = Group{}
+	return &g, nil
+}
+
+func searchGroup(name string) (*Group, error) {
+	return fetchGroup(0)
+}
+
+func createUser(name string, groups []int64, admin bool) error {
+	type body struct {
+		Admin  bool
+		Name   string
+		Groups []int64
+	}
+	b, err := json.Marshal(&body{Admin: admin, Name: name, Groups: groups})
+	if err != nil {
+		return err
+	}
+	resp, err := client.Post(api["user"].String(), jsonMime, bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	log.Print(resp)
 	return nil
 }
 
@@ -329,16 +375,38 @@ func main() {
 			log.Printf("Fetched self!: %+v\n", me)
 		}
 	case "user":
+		if err = login(privKey); err != nil {
+			log.Fatal(err)
+		}
 		switch flag.Arg(1) {
 		case "new":
+			var group []int64 = make([]int64, 0)
 			newU := flag.NewFlagSet("user new", flag.ExitOnError)
 			admin := *newU.Bool("admin", false, "Should user be an admin")
-			groups := strings.Split(*newU.String("groups", "", "Additional groups to add a user to"), ",")
+			groupStr := strings.Split(*newU.String("groups", "", "Additional groups to add a user to"), ",")
 			newU.Parse(flag.Args()[2:])
 			if newU.NArg() != 1 {
 				log.Fatalf("Wrong number of arguments!\n")
 			}
-			createUser(newU.Arg(0), groups, admin)
+			for _, v := range groupStr {
+				g, err := searchGroup(v)
+				if err != nil {
+					log.Printf("Can't find group '%s', skipping...\n", v)
+					continue
+				}
+				group = append(group, g.Id)
+			}
+
+			err := createUser(newU.Arg(0), group, admin)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case "search":
+			u, err := searchUser(flag.Arg(2))
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Print(u)
 		default:
 			log.Println("HELP")
 		}
