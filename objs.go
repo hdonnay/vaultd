@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	//"io"
-	"time"
 	"github.com/gokyle/cryptobox/box"
+	"github.com/golang/glog"
+	"time"
 )
 
 const (
@@ -59,22 +60,22 @@ func dbInit(db *sql.DB) error {
 	var err error
 	_, err = db.Exec(initSQL)
 	if err != nil {
-		l.Println("error intializing database")
+		glog.Errorln("error intializing database")
 		return err
 	}
 	q = map[string]*sql.Stmt{}
 	prepare := map[string]string{
-		"getUser": "SELECT name, pubkey, creation, admin FROM users WHERE id = $1",
-		"getUserIdByName": "SELECT id FROM users WHERE name = $1",
-		"getGroup": "SELECT name, admin, member, userGroup FROM groups WHERE id = $1",
+		"getUser":          "SELECT name, pubkey, creation, admin FROM users WHERE id = $1",
+		"getUserIdByName":  "SELECT id FROM users WHERE name = $1",
+		"getGroup":         "SELECT name, admin, member, userGroup FROM groups WHERE id = $1",
 		"getGroupIdByName": "SELECT id FROM groups WHERE name = $1",
-		"checkToken": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND token = $2 AND expire > current_timestamp);",
-		"checkChallenge": "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND challenge = $2 AND expire > current_timestamp);",
+		"checkToken":       "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND token = $2 AND expire > current_timestamp);",
+		"checkChallenge":   "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND challenge = $2 AND expire > current_timestamp);",
 	}
 	for name, query := range prepare {
 		x, err := db.Prepare(query)
 		if err != nil {
-			l.Printf("error preparing: %s\t%s\n", name, query)
+			glog.Errorf("error preparing: %s\t%s\n", name, query)
 			return err
 		}
 		q[name] = x
@@ -86,7 +87,7 @@ func dbInit(db *sql.DB) error {
 type User struct {
 	Id       int64
 	Name     string
-	PubKey   *box.PublicKey
+	PubKey   box.PublicKey
 	Creation time.Time
 	Admin    bool
 }
@@ -103,7 +104,7 @@ func (u *User) Save() error {
 	db.QueryRow("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1);", u.Id).Scan(&exists)
 	if !exists {
 		r, err = db.Exec("INSERT INTO users (id, name, pubKey, creation, admin) VALUES ($1, $2, $3, $4, $5);",
-			u.Id, u.Name, []byte(*u.PubKey), u.Creation, u.Admin)
+			u.Id, u.Name, []byte(u.PubKey), u.Creation, u.Admin)
 	} else {
 		return errors.New("user already exists")
 	}
@@ -111,16 +112,18 @@ func (u *User) Save() error {
 		return err
 	}
 	id, _ = r.LastInsertId()
-	l.Printf("User.Save(): Last Insert Id: %x\n", id)
+	if glog.V(1) {
+		glog.Infof("User.Save(): Last Insert Id: %x\n", id)
+	}
 	return nil
 }
 
 // Group
 type Group struct {
-	Id       int64
-	Name     string
-	Admin    []int64
-	Member   []int64
+	Id        int64
+	Name      string
+	Admin     []int64
+	Member    []int64
 	UserGroup bool
 }
 
@@ -144,7 +147,9 @@ func (g *Group) Save() error {
 		return err
 	}
 	id, _ = r.LastInsertId()
-	l.Printf("Group.Save(): Last Insert Id: %x\n", id)
+	if glog.V(1) {
+		glog.Infof("Group.Save(): Last Insert Id: %x\n", id)
+	}
 	return nil
 }
 
@@ -161,9 +166,9 @@ func (sm *SecretMap) String() string {
 
 // Secret Bits
 type Secret struct {
-	Id     int64
-	Uri    string
-	Note   string
+	Id   int64
+	Uri  string
+	Note string
 	//Meta   map[string]string
 	Box    []byte
 	Signer int64
@@ -189,51 +194,6 @@ type Challenge struct {
 // defined objects.
 //
 
-type orm struct {
-	*sql.DB
-	selUserById  *sql.Stmt
-	selGroupById *sql.Stmt
-	checkUserId  *sql.Stmt
-	checkGroupId *sql.Stmt
-	insChallenge *sql.Stmt
-	insUser      *sql.Stmt
-	insGroup     *sql.Stmt
-	insUGM       *sql.Stmt
-}
-
-// Init prepares frequently used queries.
-func (o *orm) Init() error {
-	var err error
-	// SELECTs
-	o.selGroupById, err = o.Prepare("SELECT name, pubkey, cryptedPrivKey, admin FROM groups WHERE id = $1")
-	if err != nil {
-		return err
-	}
-	// Id checks. Used to determine when to INSERT or UPDATE
-	o.checkUserId, err = o.Prepare("")
-	if err != nil {
-		return err
-	}
-
-	// INSERTs
-	o.insUser, err = o.Prepare("INSERT INTO users (id, name, pubKey, creation, admin) VALUES (default, $1, $2, $3, $4);")
-	if err != nil {
-		return err
-	}
-	o.insGroup, err = o.Prepare("INSERT INTO groups (id, name, pubKey, cryptedPrivKey, hidden) VALUES (default, $1, $2, $3, $4);")
-	if err != nil {
-		return err
-	}
-	o.insUGM, err = o.Prepare("INSERT INTO ugm (id, userId, groupId, cryptedSymKey, admin) VALUES (default, $1, $2, $3, $4)")
-	if err != nil {
-		return err
-	}
-
-	// DELETEs
-	// UPDATEs
-	return nil
-}
-
 // This function is always used to actually return a User record.
 // Other methods look up the id from the relevant bit of information and then call this.
 func GetUser(id int64) (*User, error) {
@@ -248,7 +208,7 @@ func GetUser(id int64) (*User, error) {
 	}
 	k := box.PublicKey(key)
 	//return &User{id, name, der.(*box.PublicKey), creation, admin}, nil
-	return &User{id, name, &k, creation, admin}, nil
+	return &User{id, name, k, creation, admin}, nil
 }
 
 func GetUserByName(name string) (*User, error) {
@@ -345,24 +305,23 @@ func CheckChallenge(id int64, challenge []byte) bool {
 // Higher order functions
 //
 
-func NewUser(name string, admin bool) (error, *User, *box.PrivateKey) {
+func NewUser(name string, admin bool) (error, *User, box.PrivateKey) {
 	var err error
 	var id int64
 	id, err = nextId("user")
 	priv, pub, ok := box.GenerateKey()
 	if !ok {
-		l.Println(err)
+		glog.Errorln(err)
 		return err, nil, nil
 	}
 	// cast so that we don't need to need to include cryptobox everywhere
-	newUser := &User{Id: id, Name: name, PubKey: &pub, Creation: time.Now().UTC(), Admin: admin}
+	newUser := &User{Id: id, Name: name, PubKey: pub, Creation: time.Now().UTC(), Admin: admin}
 	err = newUser.Save()
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		return err, nil, nil
 	}
-	//l.Println("TODO: write out private key.", priv)
-	return nil, newUser, &priv
+	return nil, newUser, priv
 }
 
 func NewGroup(name string, primaryUserId int64, isUserGroup bool) (error, *Group) {
@@ -372,11 +331,11 @@ func NewGroup(name string, primaryUserId int64, isUserGroup bool) (error, *Group
 	if err != nil {
 		return err, nil
 	}
-	var newGroup *Group = &Group{ Id: nid, Name: name, Admin: []int64{primaryUserId},
-		Member: []int64{primaryUserId}, UserGroup: isUserGroup }
+	var newGroup *Group = &Group{Id: nid, Name: name, Admin: []int64{primaryUserId},
+		Member: []int64{primaryUserId}, UserGroup: isUserGroup}
 	err = newGroup.Save()
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		return err, nil
 	}
 	return nil, newGroup

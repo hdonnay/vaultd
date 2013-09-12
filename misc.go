@@ -3,11 +3,11 @@ package main
 // vim: set noexpandtab :
 
 import (
-	"net/http"
-	"strconv"
+	//"net/http"
+	//"strconv"
 	//"database/sql"
-	"errors"
 	"encoding/base64"
+	"errors"
 	//"os"
 	//"time"
 )
@@ -34,20 +34,4 @@ func decodeBase64(in string) []byte {
 		return nil
 	}
 	return out[0:n]
-}
-
-func parseCookie(r *http.Request) (id int64, tok string) {
-	var c *http.Cookie
-	var err error
-	if c, err = r.Cookie("id"); err != nil {
-		l.Println(err)
-		return -1, ""
-	}
-	id, _ = strconv.ParseInt(c.Value, 10, 64)
-	if c, err = r.Cookie("token"); err != nil {
-		l.Println(err)
-		return -1, ""
-	}
-	tok = c.Value
-	return
 }

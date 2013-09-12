@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"github.com/emicklei/go-restful"
 	"github.com/gokyle/cryptobox/box"
+	"github.com/golang/glog"
 	//"crypto/x509"
 	//	"database/sql"
 	"encoding/base64"
@@ -35,34 +36,46 @@ func checkAuthentication(req *restful.Request, resp *restful.Response, chain *re
 	var valid bool
 	token, err = req.Request.Cookie("Token")
 	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("'Token' not set in cookie")
+		}
 		resp.WriteErrorString(400, "'Token' not set in cookie")
-		l.Println("'Token' not set in cookie")
 		return
 	}
 	idStr, err := req.Request.Cookie("Id")
 	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("'Id' not set in cookie")
+		}
 		resp.WriteErrorString(400, "'Id' not set in cookie")
-		l.Println("'Id' not set in cookie")
 		return
 	}
 	id, err = strconv.ParseInt(idStr.Value, 10, 64)
 	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("'Id' not valid int64")
+		}
 		resp.WriteErrorString(400, "'Id' not valid int64")
-		l.Println("'Id' not valid int64")
 		return
 	}
 	err = q["checkToken"].QueryRow(id, decodeBase64(token.Value)).Scan(&valid)
 	if err != nil {
+		if glog.V(2) {
+			glog.Errorf("Token checking SQL returned error: %v\n", q["checkToken"])
+		}
 		resp.WriteErrorString(500, "error checking token")
-		l.Printf("Token checking SQL returned error: %v\n", q["checkToken"])
 		return
 	}
 	if !valid {
+		if glog.V(1) {
+			glog.Infof("Auth BAD for %d\n", id)
+		}
 		resp.WriteErrorString(401, "Unauthenticated")
-		l.Printf("Auth BAD for %d\n", id)
 		return
 	}
-	l.Printf("Auth OK for %d\n", id)
+	if glog.V(1) {
+		glog.Infof("Auth OK for %d\n", id)
+	}
 	chain.ProcessFilter(req, resp)
 }
 
@@ -79,37 +92,43 @@ func getChallenge(req *restful.Request, resp *restful.Response) {
 
 	u, err := GetUserByName(name)
 	if err != nil {
-		l.Println(err)
+		if glog.V(2) {
+			glog.Errorln(err)
+		}
 		resp.WriteErrorString(http.StatusBadRequest, "Cannot find user")
 		return
 	}
 
 	_, err = io.ReadFull(rand.Reader, c)
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		resp.WriteErrorString(http.StatusInternalServerError, "Error generating challenge")
 		return
 	}
 
 	//box, ok := box.SignAndSeal(c, boxPriv, boxPub, *u.PubKey)
-	box, ok := box.Seal(c, *u.PubKey)
+	box, ok := box.Seal(c, u.PubKey)
 	if !ok {
-		l.Println("Error boxing challenge")
+		glog.Errorln("Error boxing challenge")
 		resp.WriteErrorString(http.StatusInternalServerError, "Error boxing challenge")
 		return
 	}
 	err = SaveChallenge(u.Id, c)
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		resp.WriteErrorString(http.StatusInternalServerError, "Error recording challenge")
 		return
 	}
 
-	resp.WriteEntity(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(box), "id": fmt.Sprintf("%d",u.Id)})
-	l.Printf("Auth.Login: sent challenge for %s\n", name)
-	l.Printf("token:\t%x\n", c)
-	l.Printf("encrypted challenge:\t%v\n", base64.StdEncoding.EncodeToString(box))
-	l.Printf("id:\t%d\n", u.Id)
+	resp.WriteEntity(&map[string]string{"challenge": base64.StdEncoding.EncodeToString(box), "id": fmt.Sprintf("%d", u.Id)})
+	if glog.V(1) {
+		glog.Infof("Auth.Login: sent challenge for %s\n", name)
+		if glog.V(3) {
+			glog.Infof("id:\t%d\n", u.Id)
+			glog.Infof("token:\t%x\n", c)
+			glog.Infof("encrypted challenge:\t%v\n", base64.StdEncoding.EncodeToString(box))
+		}
+	}
 	return
 }
 
@@ -122,16 +141,22 @@ func postChallenge(req *restful.Request, resp *restful.Response) {
 
 	err = req.ReadEntity(&c)
 	if err != nil {
-		l.Println(err)
+		if glog.V(1) {
+			glog.Warningln(err)
+		}
 		resp.WriteErrorString(http.StatusInternalServerError, "Error deserialzing response")
 		return
 	}
 
-	l.Printf("got: %+v\n", c)
+	if glog.V(3) {
+		glog.Infof("recv'd:\t%+v\n", c)
+	}
 	_, okC := c["challenge"]
 	_, okI := c["id"]
 	if !(okC && okI) {
-		l.Println("Malformed response")
+		if glog.V(2) {
+			glog.Warningln("Malformed response")
+		}
 		resp.WriteErrorString(http.StatusBadRequest, "Malformed response")
 		return
 	}
@@ -149,25 +174,111 @@ func postChallenge(req *restful.Request, resp *restful.Response) {
 
 	_, err = io.ReadFull(rand.Reader, tok)
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		resp.WriteErrorString(http.StatusInternalServerError, "Error generating token")
 		return
 	}
 
 	err = SaveToken(id, tok)
 	if err != nil {
-		l.Println(err)
+		glog.Errorln(err)
 		resp.WriteErrorString(http.StatusInternalServerError, "Error saving token")
 		return
 	}
 
-	for k, v :=  range map[string]string{
+	for k, v := range map[string]string{
 		"Token": base64.StdEncoding.EncodeToString(tok),
-		"Id": fmt.Sprintf("%d", id),
+		"Id":    fmt.Sprintf("%d", id),
 	} {
-		cookie := &http.Cookie{ Name: k, Value: v}
+		cookie := &http.Cookie{Name: k, Value: v}
 		http.SetCookie(resp.ResponseWriter, cookie)
+		if glog.V(3) {
+			glog.Infof("Set cookie:\t%s:%s\n", k, v)
+		}
+	}
+	if glog.V(3) {
+		glog.Infof("Send auth token for %d\n", id)
 	}
 
 	return
+}
+
+func fetchUser(req *restful.Request, resp *restful.Response) {
+	id, err := strconv.ParseInt(req.PathParameter("id"), 10, 64)
+	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("unable to parse id")
+		}
+		resp.WriteErrorString(http.StatusBadRequest, "unable to parse Id")
+		return
+	}
+	u, err := GetUser(id)
+	if err != nil {
+		if glog.V(2) {
+			glog.Warningf("unable to find user with id %d\n", id)
+		}
+		resp.WriteErrorString(http.StatusBadRequest, "unable to find user with Id")
+		return
+	}
+	if glog.V(3) {
+		glog.Infof("Sent info for user %d\n", id)
+	}
+	resp.WriteEntity(u)
+}
+
+func createUser(req *restful.Request, resp *restful.Response) {
+	var err error
+	type body struct {
+		Admin  bool
+		Name   string
+		groups []int64
+	}
+	var b body = body{}
+
+	err = req.ReadEntity(&b)
+	if err != nil {
+		glog.Info("Malformed body")
+		resp.WriteErrorString(http.StatusBadRequest, "malformed body")
+		return
+	}
+	if glog.V(3) {
+		glog.Info(b)
+	}
+}
+
+func modifyUser(req *restful.Request, resp *restful.Response) {
+}
+
+func removeUser(req *restful.Request, resp *restful.Response) {
+}
+
+func searchUser(req *restful.Request, resp *restful.Response) {
+	var name string = req.QueryParameter("name")
+	var id []int64
+	rows, err := db.Query("SELECT id FROM users WHERE name LIKE $1;", name)
+	if err != nil {
+		glog.Error(err)
+		return
+	}
+
+	for rows.Next() {
+		var t int64
+		if err := rows.Scan(&t); err != nil {
+			glog.Error(err)
+			return
+		}
+		id = append(id, t)
+	}
+
+	if len(id) == 0 {
+		if glog.V(2) {
+			glog.Infof("bad name: %s\n", name)
+		}
+		resp.WriteErrorString(http.StatusBadRequest, "unable to find any user with name")
+		return
+	}
+	if glog.V(3) {
+		glog.Infof("Successful search for user %d\n", id)
+	}
+	resp.WriteEntity(&map[string][]int64{"id": id})
 }
