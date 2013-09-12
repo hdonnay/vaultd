@@ -1,4 +1,4 @@
-all: ovaultd
+all: vaultd
 
 ovaultd: *.go
 	@go get github.com/lib/pq
@@ -8,11 +8,11 @@ ovaultd: *.go
 	@go fmt
 	@go build
 
-setcap: ovaultd
+setcap: vaultd
 	setcap 'CAP_NET_BIND_SERVICE=+ei' vaultd
 
-pack: ovaultd
-	@goupx ovaultd
+pack: vaultd
+	@goupx vaultd
 
 clean:
 	go clean
@@ -22,7 +22,7 @@ install:
 	ln -s `pwd` $$GOPATH/src/github.com/hdonnay/ovaultd
 	go install github.com/hdonnay/ovaultd
 
-debug: ovaultd
-	 ./ovaultd -logtostderr -v=3 -stderrthreshold=3
+debug: vaultd
+	 ./vaultd -logtostderr -v=3 -stderrthreshold=3
 
 .PHONY: test clean setcap pack
