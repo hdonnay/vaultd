@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	//"time"
+	"regexp"
 	"strconv"
 )
 
@@ -80,7 +81,27 @@ func checkAuthentication(req *restful.Request, resp *restful.Response, chain *re
 }
 
 func checkAuthorization(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+	idStr, _ := req.Request.Cookie("Id")
+	id, _ := strconv.ParseInt(idStr.Value, 10, 64)
+	u, _ := GetUser(id)
+	if path, _ := regexp.MatchString("^/api/user(/.*)?$", req.Request.URL.Path); path {
+		switch req.Request.Method {
+		case "DELETE", "PUT":
+			if !u.Admin || req.PathParameter("id") != string(u.Id) {
+				resp.WriteErrorString(403, "Unauthorized")
+				return
+			}
+		case "POST":
+			if !u.Admin {
+				resp.WriteErrorString(403, "Unauthorized")
+				return
+			}
+		default:
+			break
+		}
+	}
 	chain.ProcessFilter(req, resp)
+	return
 }
 
 // GET /api/auth?name=me
