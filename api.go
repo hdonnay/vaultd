@@ -228,21 +228,20 @@ func fetchUser(req *restful.Request, resp *restful.Response) {
 
 func createUser(req *restful.Request, resp *restful.Response) {
 	var err error
-	type body struct {
+	var body struct {
 		Admin  bool
 		Name   string
-		groups []int64
+		Groups []int64
 	}
-	var b body = body{}
 
-	err = req.ReadEntity(&b)
+	err = req.ReadEntity(&body)
 	if err != nil {
 		glog.Info("Malformed body")
 		resp.WriteErrorString(http.StatusBadRequest, "malformed body")
 		return
 	}
 	if glog.V(3) {
-		glog.Info(b)
+		glog.Info(body)
 	}
 }
 
