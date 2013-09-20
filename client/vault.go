@@ -1,6 +1,6 @@
 package main
 
-// vim: set noexpandtab :
+// vim: set noexpandtab:
 
 import (
 	"bytes"
