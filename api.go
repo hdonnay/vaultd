@@ -267,9 +267,29 @@ func createUser(req *restful.Request, resp *restful.Response) {
 }
 
 func modifyUser(req *restful.Request, resp *restful.Response) {
+	id, err := strconv.ParseInt(req.PathParameter("id"), 10, 64)
+	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("unable to parse id")
+		}
+		resp.WriteErrorString(http.StatusBadRequest, "unable to parse Id")
+		return
+	}
+	resp.WriteErrorString(http.StatusNotImplemented, fmt.Sprintf("%d", id))
+	return
 }
 
 func removeUser(req *restful.Request, resp *restful.Response) {
+	id, err := strconv.ParseInt(req.PathParameter("id"), 10, 64)
+	if err != nil {
+		if glog.V(2) {
+			glog.Warningln("unable to parse id")
+		}
+		resp.WriteErrorString(http.StatusBadRequest, "unable to parse Id")
+		return
+	}
+	resp.WriteErrorString(http.StatusNotImplemented, fmt.Sprintf("%d", id))
+	return
 }
 
 func searchUser(req *restful.Request, resp *restful.Response) {
