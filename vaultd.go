@@ -1,10 +1,8 @@
 package main
 
-// vim: set noexpandtab :
+// vim: set noexpandtab:
 
 import (
-	//"crypto/tls"
-	//"crypto/x509"
 	"bytes"
 	"database/sql"
 	"flag"
@@ -15,8 +13,9 @@ import (
 	_ "github.com/lib/pq"
 	"io"
 	"io/ioutil"
-	//"log"
 	"net/http"
+	//remove when not debugging
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
