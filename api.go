@@ -13,7 +13,7 @@ import (
 	"github.com/gokyle/cryptobox/box"
 	"github.com/golang/glog"
 	//"crypto/x509"
-	//	"database/sql"
+	"database/sql"
 	"encoding/base64"
 	//"fmt"
 	//"errors"
@@ -321,4 +321,33 @@ func searchUser(req *restful.Request, resp *restful.Response) {
 		glog.Infof("Successful search for user %d\n", id)
 	}
 	resp.WriteEntity(&map[string][]int64{"id": id})
+}
+
+func allSecrets(req *restful.Request, resp *restful.Response) {
+	var rows *sql.Rows
+	type row struct {
+		Id       int64
+		Revision int64
+		URI      string
+		Note     string
+		Secret   []byte
+		SignerId int64
+	}
+	var ret []row //= make(row, 0)
+	idStr, _ := req.Request.Cookie("Id")
+	id, _ := strconv.ParseInt(idStr.Value, 10, 64)
+	rows, err := db.Query("SELECT (id, rev, uri, note, box, signer) FROM users_secrets WHERE uid = $1;", id)
+	if err != nil {
+		glog.Error(err)
+		resp.WriteErrorString(500, "Problem querying database")
+	}
+
+	for rows.Next() {
+		var id, rev, signerId int64
+		var uri, note string
+		var secret []byte
+		rows.Scan(&id, &rev, &uri, &note, &secret, &signerId)
+		ret = append(ret, row{id, rev, uri, note, secret, signerId})
+	}
+	resp.WriteEntity(&map[string][]row{"secrets": ret})
 }
