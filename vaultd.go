@@ -152,7 +152,7 @@ func main() {
 			glog.Fatal(err)
 		}
 		glog.Warningf("Wrote private key to '%s' -- create a real admin user and delete the key.\n", adminDefaultFile)
-		err, _ = NewGroup("root", u.Id, true)
+		err, _ = NewGroup("root", u.Id, false)
 		if err != nil {
 			glog.Fatal(err)
 		}
