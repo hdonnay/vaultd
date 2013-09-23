@@ -198,6 +198,8 @@ func main() {
 		Doc("Remove a user.").
 		Param(api.PathParameter("id", "Id of user to modify.").DataType("int")))
 
+	api.Route(api.GET("/secrets").Filter(checkAuthentication).To(allSecrets).
+		Doc("Return all secrets for a user"))
 	/*
 		http.HandleFunc("/api/login", as.Login)
 		http.HandleFunc("/api/auth", as.Authenticate)
