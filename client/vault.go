@@ -91,6 +91,14 @@ type Group struct {
 	UserGroup bool
 }
 
+type secret struct {
+	Id     int64
+	Uri    string
+	Note   string
+	Secret []byte
+	Signer int64
+}
+
 func decodeBase64(in string) []byte {
 	out := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
 	n, err := base64.StdEncoding.Decode(out, []byte(in))
@@ -299,6 +307,18 @@ func createUser(name string, groups []int64, admin bool) error {
 	return nil
 }
 
+func fetchSecrets() ([]secret, error) {
+	var s []secret
+	res, err := client.Get(api["secrets"].String())
+	if err != nil {
+		return nil, err
+	}
+	d := json.NewDecoder(res.Body)
+	defer res.Body.Close()
+	d.Decode(&s)
+	return s, nil
+}
+
 var Usage = func() {
 	fmt.Fprintf(os.Stderr, "%s v%s -- Usage:\n\n", os.Args[0], VERSION)
 	fmt.Fprintf(os.Stderr, "Options:\n")
@@ -339,6 +359,7 @@ func init() {
 	api["auth"], _ = url.Parse(fmt.Sprintf("%s/api/auth", baseUrl))
 	api["valid"], _ = url.Parse(fmt.Sprintf("%s/api/noop", baseUrl))
 	api["user"], _ = url.Parse(fmt.Sprintf("%s/api/user", baseUrl))
+	api["secrets"], _ = url.Parse(fmt.Sprintf("%s/api/secrets", baseUrl))
 }
 
 func main() {
@@ -373,6 +394,12 @@ func main() {
 			log.Fatalf("Could not fetch self: %v\n", err)
 		} else {
 			log.Printf("Fetched self!: %+v\n", me)
+		}
+		s, err := fetchSecrets()
+		if err != nil {
+			log.Fatalf("Could not fetch secrets: %v\n", err)
+		} else {
+			log.Printf("Fetched secrets!: %+v\n", s)
 		}
 	case "user":
 		if err = login(privKey); err != nil {
