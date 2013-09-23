@@ -30,22 +30,28 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS groups (
 	id        bigserial NOT NULL UNIQUE PRIMARY KEY,
 	name      varchar(255),
-	admin     bigint[],
-	member    bigint[],
+	-- User group means there should only be one member.
 	userGroup boolean
 );
-CREATE TABLE IF NOT EXISTS secret (
+CREATE TABLE IF NOT EXISTS users_groups (
+	uid bigint REFERENCES users (id),
+	gid bigint REFERENCES groups (id),
+	-- Is user (uid) and admin of group (gid)
+	admin bool
+);
+CREATE TABLE IF NOT EXISTS secrets (
 	id     bigserial NOT NULL UNIQUE PRIMARY KEY,
+	rev    bigint NOT NULL,
 	uri    text,
 	note   text,
 	box    bytea,
 	signer bigint
 );
-CREATE TABLE IF NOT EXISTS secretMap (
-	id       bigserial NOT NULL UNIQUE PRIMARY KEY,
-	isGroup  boolean,
-	ownerId  bigint,
-	secretId bigint
+CREATE TABLE IF NOT EXISTS groups_secrets (
+	-- All secrets are owned by a group. All users have a group they're the only member of.
+	-- This may make some lookups more expensive, but makes lookups logically simpler
+	owner  bigint REFERENCES groups (id),
+	secret bigint REFERENCES secrets (id)
 );
 DROP TABLE IF EXISTS session;
 CREATE TABLE session (
@@ -54,6 +60,14 @@ CREATE TABLE session (
 	challenge bytea,
 	expire    timestamp
 );
+CREATE OR REPLACE VIEW users_secrets AS
+	SELECT u.id AS uid, s.id AS id, s.rev, s.uri, s.note, s.box, s.signer FROM
+		users as u
+		LEFT JOIN users_groups AS ug ON (u.id = ug.uid)
+		LEFT JOIN groups AS g ON (g.id = ug.gid)
+		LEFT JOIN groups_secrets AS gs ON (g.id = gs.owner)
+		LEFT JOIN secrets AS s ON (s.id = gs.secret)
+WHERE s.box IS NOT NULL;
 COMMIT; `
 
 func dbInit(db *sql.DB) error {
@@ -67,7 +81,7 @@ func dbInit(db *sql.DB) error {
 	prepare := map[string]string{
 		"getUser":          "SELECT name, pubkey, creation, admin FROM users WHERE id = $1",
 		"getUserIdByName":  "SELECT id FROM users WHERE name = $1",
-		"getGroup":         "SELECT name, admin, member, userGroup FROM groups WHERE id = $1",
+		"getGroup":         "SELECT name, userGroup FROM groups WHERE id = $1",
 		"getGroupIdByName": "SELECT id FROM groups WHERE name = $1",
 		"checkToken":       "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND token = $2 AND expire > current_timestamp);",
 		"checkChallenge":   "SELECT EXISTS (SELECT 1 FROM session WHERE id = $1 AND challenge = $2 AND expire > current_timestamp);",
@@ -98,20 +112,41 @@ func (u *User) String() string {
 
 func (u *User) Save() error {
 	var err error
-	var r sql.Result
-	var exists bool
 	var id int64
-	db.QueryRow("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1);", u.Id).Scan(&exists)
-	if !exists {
-		r, err = db.Exec("INSERT INTO users (id, name, pubKey, creation, admin) VALUES ($1, $2, $3, $4, $5);",
-			u.Id, u.Name, []byte(u.PubKey), u.Creation, u.Admin)
-	} else {
-		return errors.New("user already exists")
+
+	if u.Id != 0 {
+		return errors.New("user Id already populated")
 	}
+
+	tx, err := db.Begin()
+	var gid int64
 	if err != nil {
-		return err
+		return errors.New("unable to begin transaction to create user")
 	}
-	id, _ = r.LastInsertId()
+	err = tx.QueryRow("INSERT INTO groups (id, name, userGroup) VALUES (default, $1, TRUE) RETURNING id;", fmt.Sprintf("%s/group", u.Name)).
+		Scan(&gid)
+	if err != nil {
+		tx.Rollback()
+		return errors.New(fmt.Sprintf("unable to create group for user: %v", err))
+	}
+	err = tx.QueryRow("INSERT INTO users (id, name, pubKey, creation, admin) VALUES (default, $1, $2, $3, $4) RETURNING id;",
+		u.Name, []byte(u.PubKey), u.Creation, u.Admin).Scan(&id)
+	if err != nil {
+		tx.Rollback()
+		return errors.New(fmt.Sprintf("unable to insert user: %v", err))
+	}
+	u.Id = id
+	_, err = tx.Exec("INSERT INTO users_groups (uid, gid, admin) VALUES ($1, $2, TRUE);", id, gid)
+	if err != nil {
+		tx.Rollback()
+		return errors.New(fmt.Sprintf("unable to associate user and group: %v", err))
+	}
+	err = tx.Commit()
+	if err != nil {
+		tx.Rollback()
+		return errors.New(fmt.Sprintf("unable to commit transaction to create user: %v", err))
+	}
+
 	if glog.V(1) {
 		glog.Infof("User.Save(): Last Insert Id: %x\n", id)
 	}
@@ -133,20 +168,20 @@ func (g *Group) String() string {
 
 func (g *Group) Save() error {
 	var err error
-	var r sql.Result
-	var exists bool
 	var id int64
-	db.QueryRow("SELECT EXISTS (SELECT 1 FROM groups WHERE id = $1);", g.Id).Scan(&exists)
-	if !exists {
-		r, err = db.Exec("INSERT INTO groups (id, name, admin[1], member[1], userGroup) VALUES ($1, $2, $3, $4, $5);",
-			g.Id, g.Name, g.Admin[0], g.Member[0], g.UserGroup)
-	} else {
-		return errors.New("group already exists")
+
+	if g.Id != 0 {
+		return errors.New("group Id already populated")
 	}
+
+	err = db.QueryRow("INSERT INTO groups (id, name, userGroup) VALUES (default, $1, $2) RETURNING id;", g.Name, g.UserGroup).
+		Scan(&id)
 	if err != nil {
 		return err
 	}
-	id, _ = r.LastInsertId()
+
+	g.Id = id
+
 	if glog.V(1) {
 		glog.Infof("Group.Save(): Last Insert Id: %x\n", id)
 	}
@@ -224,14 +259,12 @@ func GetUserByName(name string) (*User, error) {
 // The following group methods are the same as their User counterparts
 func GetGroup(id int64) (*Group, error) {
 	var name string
-	var admin []int64
-	var member []int64
 	var primary bool
-	err := q["getGroup"].QueryRow(id).Scan(&name, &admin, &member, &primary)
+	err := q["getGroup"].QueryRow(id).Scan(&name, &primary)
 	if err != nil {
 		return nil, err
 	}
-	return &Group{id, name, admin, member, primary}, nil
+	return &Group{Id: id, Name: name, UserGroup: primary}, nil
 }
 
 func GetGroupByName(name string) (*Group, error) {
@@ -307,15 +340,13 @@ func CheckChallenge(id int64, challenge []byte) bool {
 
 func NewUser(name string, admin bool) (error, *User, box.PrivateKey) {
 	var err error
-	var id int64
-	id, err = nextId("user")
 	priv, pub, ok := box.GenerateKey()
 	if !ok {
 		glog.Errorln(err)
 		return err, nil, nil
 	}
 	// cast so that we don't need to need to include cryptobox everywhere
-	newUser := &User{Id: id, Name: name, PubKey: pub, Creation: time.Now().UTC(), Admin: admin}
+	newUser := &User{Name: name, PubKey: pub, Creation: time.Now().UTC(), Admin: admin}
 	err = newUser.Save()
 	if err != nil {
 		glog.Errorln(err)
@@ -326,14 +357,16 @@ func NewUser(name string, admin bool) (error, *User, box.PrivateKey) {
 
 func NewGroup(name string, primaryUserId int64, isUserGroup bool) (error, *Group) {
 	var err error
-	var nid int64
-	nid, err = nextId("group")
 	if err != nil {
 		return err, nil
 	}
-	var newGroup *Group = &Group{Id: nid, Name: name, Admin: []int64{primaryUserId},
-		Member: []int64{primaryUserId}, UserGroup: isUserGroup}
+	var newGroup *Group = &Group{Name: name, UserGroup: isUserGroup}
 	err = newGroup.Save()
+	if err != nil {
+		glog.Errorln(err)
+		return err, nil
+	}
+	_, err = db.Exec("INSERT INTO users_groups (uid, gid, admin) VALUES ($1, $2, TRUE);", primaryUserId, newGroup.Id)
 	if err != nil {
 		glog.Errorln(err)
 		return err, nil
